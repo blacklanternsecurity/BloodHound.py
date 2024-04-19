@@ -235,7 +235,7 @@ class ADDC(ADComputer):
             return e
 
     def get_domain_controllers(self):
-        entries = self.search('(userAccountControl:1.2.840.113556.1.4.803:=8192)',
+        entries = self.search('(userAccountControl=8192)',
                               ['dnshostname', 'samaccounttype', 'samaccountname',
                                'serviceprincipalname', 'objectSid'])
 
@@ -360,7 +360,7 @@ class ADDC(ADComputer):
         dncache = {}
         for nc, domain in self.ad.domains.items():
             logging.info('Processing domain %s', domain['attributes']['name'])
-            query = '(|(&(objectCategory=person)(objectClass=user))(objectClass=group)(&(sAMAccountType=805306369)(!(UserAccountControl:1.2.840.113556.1.4.803:=2))))'
+            query = '(|(&(objectCategory=person)(objectClass=user))(objectClass=group)(&(sAMAccountType=805306369)))'
             entries = self.search(query,
                                   use_gc=True,
                                   use_resolver=True,
@@ -549,7 +549,7 @@ class ADDC(ADComputer):
         return entries
 
     def get_sessions(self):
-        entries = self.search('(&(samAccountType=805306368)(!(userAccountControl:1.2.840.113556.1.4.803:=2))(|(homedirectory=*)(scriptpath=*)(profilepath=*)))',
+        entries = self.search('(&(samAccountType=805306368))(|(homedirectory=*)(scriptpath=*)(profilepath=*)))',
                               ['homedirectory', 'scriptpath', 'profilepath'])
         return entries
 
