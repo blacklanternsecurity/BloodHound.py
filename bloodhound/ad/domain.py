@@ -237,7 +237,7 @@ class ADDC(ADComputer):
     def get_domain_controllers(self):
         entries = self.search('(userAccountControl=8192)',
                               ['dnshostname', 'samaccounttype', 'samaccountname',
-                               'serviceprincipalname', 'objectSid'])
+                               'objectSid'])
 
         return entries
 
@@ -434,7 +434,7 @@ class ADDC(ADComputer):
             properties.append('msDS-GroupMSAMembership')
 
         if include_properties:
-            properties += ['servicePrincipalName', 'userAccountControl', 'displayName',
+            properties += ['userAccountControl', 'displayName',
                            'lastLogon', 'lastLogonTimestamp', 'pwdLastSet', 'mail', 'title', 'homeDirectory',
                            'description', 'userPassword', 'adminCount', 'msDS-AllowedToDelegateTo', 'sIDHistory',
                            'whencreated', 'unicodepwd', 'scriptpath']
@@ -476,7 +476,7 @@ class ADDC(ADComputer):
                       'dnshostname', 'samaccounttype', 'objectSid', 'primaryGroupID',
                       'isDeleted']
         if include_properties:
-            properties += ['servicePrincipalName', 'msDS-AllowedToDelegateTo', 'sIDHistory', 'whencreated',
+            properties += ['msDS-AllowedToDelegateTo', 'sIDHistory', 'whencreated',
                            'lastLogon', 'lastLogonTimestamp', 'pwdLastSet', 'operatingSystem', 'description',
                            'operatingSystemServicePack']
             # Difference between guid map which maps the lowercase schema object name and the property name itself
