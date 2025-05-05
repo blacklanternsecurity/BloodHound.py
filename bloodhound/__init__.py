@@ -65,7 +65,7 @@ class BloodHound(object):
         self.ad.create_objectresolver(self.pdc)
 
 
-    def run(self, collect, num_workers=10, disable_pooling=False, timestamp="", computerfile="", cachefile=None, exclude_dcs=False, fileNamePrefix=""):
+    def run(self, collect, num_workers=10, disable_pooling=False, timestamp="", computerfile="", cachefile=None, exclude_dcs=False, fileNamePrefix="", page_size=1000):
         start_time = time.time()
         if cachefile:
             self.ad.load_cachefile(cachefile)
@@ -78,7 +78,7 @@ class BloodHound(object):
             self.pdc.prefetch_info('objectprops' in collect, 'acl' in collect, cache_computers=do_computer_enum)
             # Initialize enumerator
             membership_enum = MembershipEnumerator(self.ad, self.pdc, collect, disable_pooling)
-            membership_enum.enumerate_memberships(timestamp=timestamp, fileNamePrefix=fileNamePrefix)
+            membership_enum.enumerate_memberships(timestamp=timestamp, fileNamePrefix=fileNamePrefix, page_size=page_size)
         elif 'container' in collect:
             # Fetch domains for later, computers if needed
             self.pdc.prefetch_info('objectprops' in collect, 'acl' in collect, cache_computers=do_computer_enum)
@@ -268,6 +268,12 @@ def main():
                         metavar='PREFIX_NAME',
                         action='store',
                         help='String to prepend to output file names')
+    coopts.add_argument('--page-size',
+                        metavar='SIZE',
+                        action='store',
+                        type=int,
+                        default=1000,
+                        help='LDAP page size for user enumeration (default: 1000)')
 
     args = parser.parse_args()
     logging.info('BloodHound.py for BloodHound LEGACY (BloodHound 4.2 and 4.3)')
@@ -351,7 +357,8 @@ def main():
                    computerfile=args.computerfile,
                    cachefile=args.cachefile,
                    exclude_dcs=args.exclude_dcs,
-                   fileNamePrefix=args.outputprefix)
+                   fileNamePrefix=args.outputprefix,
+                   page_size=args.page_size)
     #If args --zip is true, the compress output  
     if args.zip:
         logging.info("Compressing output into " + timestamp + "bloodhound.zip")

@@ -119,7 +119,7 @@ class MembershipEnumerator(object):
         # props['sfupassword'] = ADUtils.ensure_string(ADUtils.get_entry_property(entry, 'msSFU30Password'))
         props['sfupassword'] = None
 
-    def enumerate_users(self, timestamp="", fileNamePrefix=""):
+    def enumerate_users(self, timestamp="", fileNamePrefix="", page_size=1000):
         if (fileNamePrefix != None):
             filename = fileNamePrefix + "_" + timestamp + 'users.json'
         else:
@@ -128,7 +128,7 @@ class MembershipEnumerator(object):
         # Should we include extra properties in the query?
         with_properties = 'objectprops' in self.collect
         acl = 'acl' in self.collect
-        entries = self.addc.get_users(include_properties=with_properties, acl=acl)
+        entries = self.addc.get_users(include_properties=with_properties, acl=acl, page_size=page_size)
 
         logging.debug('Writing users to file: %s', filename)
 
@@ -142,7 +142,12 @@ class MembershipEnumerator(object):
             self.aclenumerator.init_pool()
 
         # This loops over a generator, results are fetched from LDAP on the go
+        user_count = 0
         for entry in entries:
+            user_count += 1
+            if user_count % page_size == 0:
+                logging.info('Processed %d users', user_count)
+                
             resolved_entry = ADUtils.resolve_ad_entry(entry)
             # Skip trust objects
             if resolved_entry['type'] == 'trustaccount':
@@ -227,6 +232,7 @@ class MembershipEnumerator(object):
                 # this is solely for consistency with acl parsing, the performance improvement is probably minimal
                 self.result_q.put(user)
 
+        logging.info('Completed processing %d users', user_count)
         self.write_default_users()
 
         # If we are parsing ACLs, close the parsing pool first
@@ -838,11 +844,11 @@ class MembershipEnumerator(object):
         self.enumerate_ous(timestamp, fileNamePrefix)
         self.enumerate_containers(timestamp, fileNamePrefix)
 
-    def enumerate_memberships(self, timestamp="", fileNamePrefix=""):
+    def enumerate_memberships(self, timestamp="", fileNamePrefix="", page_size=1000):
         """
         Run appropriate enumeration tasks
         """
-        self.enumerate_users(timestamp, fileNamePrefix)
+        self.enumerate_users(timestamp, fileNamePrefix, page_size)
         self.enumerate_groups(timestamp, fileNamePrefix)
         if 'container' in self.collect:
             self.do_container_collection(timestamp, fileNamePrefix)

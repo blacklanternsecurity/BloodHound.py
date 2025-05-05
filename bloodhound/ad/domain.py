@@ -117,7 +117,7 @@ class ADDC(ADComputer):
                                                      baseDN=self.ad.baseDN, protocol=protocol)
         return self.gcldap is not None
 
-    def search(self, search_filter='(objectClass=*)',attributes=None, search_base=None, generator=True, use_gc=False, use_resolver=False, query_sd=False, is_retry=False,  search_scope=SUBTREE,):
+    def search(self, search_filter='(objectClass=*)',attributes=None, search_base=None, generator=True, use_gc=False, use_resolver=False, query_sd=False, is_retry=False,  search_scope=SUBTREE, page_size=200):
         """
         Search for objects in LDAP or Global Catalog LDAP.
         """
@@ -153,7 +153,7 @@ class ADDC(ADComputer):
         sresult = searcher.extend.standard.paged_search(search_base,
                                                         search_filter,
                                                         attributes=attributes,
-                                                        paged_size=200,
+                                                        paged_size=page_size,
                                                         search_scope=search_scope,
                                                         controls=controls,
                                                         generator=generator)
@@ -427,7 +427,7 @@ class ADDC(ADComputer):
                               search_base=dn)
         return entries
 
-    def get_users(self, include_properties=False, acl=False):
+    def get_users(self, include_properties=False, acl=False, page_size=1000):
 
         properties = ['sAMAccountName', 'distinguishedName', 'sAMAccountType',
                       'objectSid', 'primaryGroupID', 'isDeleted', 'objectClass']
@@ -461,10 +461,14 @@ class ADDC(ADComputer):
             query = '(|(&(objectCategory=person)(objectClass=user)){}{})'.format(gmsa_filter, smsa_filter)
         else:
             query = '(&(objectCategory=person)(objectClass=user))'
+            
+        # Set a smaller page size to show progress during large user enumeration
+        logging.info('Enumerating users with page size: %d', page_size)
         entries = self.search(query,
-                              properties,
-                              generator=True,
-                              query_sd=acl)
+                             properties,
+                             generator=True,
+                             query_sd=acl,
+                             page_size=page_size)
         return entries
 
 
