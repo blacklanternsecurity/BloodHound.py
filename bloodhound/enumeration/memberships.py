@@ -185,7 +185,7 @@ class MembershipEnumerator(object):
                                 )['type'],
                             })
                         except KeyError:
-                            object_sam = target.upper().split(".")[0]
+                            object_sam = target.upper().split(".")[0].split("\\")[0]
                             if object_sam in delegatehosts_cache: continue
                             delegatehosts_cache.append(object_sam)
                             object_entry = self.addomain.objectresolver.resolve_samname(object_sam + '*', allow_filter=True)
@@ -246,7 +246,7 @@ class MembershipEnumerator(object):
         highvalue = ["S-1-5-32-544", "S-1-5-32-550", "S-1-5-32-549", "S-1-5-32-551", "S-1-5-32-548"]
 
         def is_highvalue(sid):
-            if sid.endswith("-512") or sid.endswith("-516") or sid.endswith("-519") or sid.endswith("-520"):
+            if sid.endswith("-512") or sid.endswith("-516") or sid.endswith("-519"):
                 return True
             if sid in highvalue:
                 return True
@@ -570,14 +570,15 @@ class MembershipEnumerator(object):
                 }
                 ou["ChildObjects"].append(out_object)
             
-            for gplink_dn, options in ADUtils.parse_gplink_string(ADUtils.get_entry_property(entry, 'gPLink', '')):
-                link = dict()
-                link['IsEnforced'] = options == 2
-                try:
-                    link['GUID'] = self.get_membership(gplink_dn.upper())['ObjectIdentifier']
-                    ou['Links'].append(link)
-                except TypeError:
-                    logging.warning('Could not resolve GPO link to {0}'.format(gplink_dn))
+            for gplink_dn, option in ADUtils.parse_gplink_string(ADUtils.get_entry_property(entry, 'gPLink', '')):
+                if option == 0 or option == 2:
+                    link = dict()
+                    link['IsEnforced'] = option == 2
+                    try:
+                        link['GUID'] = self.get_membership(gplink_dn.upper())['ObjectIdentifier']
+                        ou['Links'].append(link)
+                    except TypeError:
+                        logging.warning('Could not resolve GPO link to {0}'.format(gplink_dn))
             
             # Create cache entry for links
             link_output = {
