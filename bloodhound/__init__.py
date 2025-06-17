@@ -219,10 +219,9 @@ def main():
                         action='store_true',
                         help='Use TCP instead of UDP for DNS queries')
     coopts.add_argument('--dns-timeout',
-                        action='store',
-                        type=int,
-                        default=3,
-                        help='DNS query timeout in seconds (default: 3)')
+                        type=float,
+                        default=3.0,
+                        help='DNS request timeout in seconds')
     coopts.add_argument('-dc',
                         '--domain-controller',
                         metavar='HOST',
@@ -268,6 +267,7 @@ def main():
                         metavar='PREFIX_NAME',
                         action='store',
                         help='String to prepend to output file names')
+    coopts.add_argument('--paged', nargs='?', const=100, type=int, default=None, help='Use paged LDAP queries with specified page size (default: 100)')
 
     args = parser.parse_args()
     logging.info('BloodHound.py for BloodHound Community Edition')
@@ -303,7 +303,8 @@ def main():
             args.auth_method = 'kerberos'
             auth = ADAuthentication(username=args.username, password=args.password, domain=args.domain, auth_method=args.auth_method, ldap_channel_binding=args.ldap_channel_binding)
 
-    ad = AD(auth=auth, domain=args.domain, nameserver=args.nameserver, dns_tcp=args.dns_tcp, dns_timeout=args.dns_timeout, use_ldaps=args.use_ldaps)
+    # Initialize the AD object
+    ad = AD(domain=args.domain, auth=auth, nameserver=args.nameserver, dns_tcp=args.dns_tcp, dns_timeout=args.dns_timeout, use_ldaps=args.use_ldaps, paged=args.paged)
     # Resolve collection methods
     collect = resolve_collection_methods(args.collectionmethod)
     if not collect:

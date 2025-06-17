@@ -150,10 +150,12 @@ class ADDC(ADComputer):
                 searcher = self.ldap
 
         hadresults = False
+        # Use configured page size
+        paged_size = self.ad.page_size
         sresult = searcher.extend.standard.paged_search(search_base,
                                                         search_filter,
                                                         attributes=attributes,
-                                                        paged_size=200,
+                                                        paged_size=paged_size,
                                                         search_scope=search_scope,
                                                         controls=controls,
                                                         generator=generator)
@@ -588,7 +590,7 @@ Active Directory data and cache
 """
 class AD(object):
 
-    def __init__(self, domain=None, auth=None, nameserver=None, dns_tcp=False, dns_timeout=3.0, use_ldaps=False):
+    def __init__(self, domain=None, auth=None, nameserver=None, dns_tcp=False, dns_timeout=3.0, use_ldaps=False, paged=None):
         self.domain = domain
         # Object of type ADDomain, added later
         self.domain_object = None
@@ -600,6 +602,9 @@ class AD(object):
         self._kdcs = []
         # Global catalog servers
         self._gcs = []
+        # Paged search settings
+        self.paged = paged is not None
+        self.page_size = paged if paged is not None else 100
 
         self.domains = {}
         self.nbdomains = {}
