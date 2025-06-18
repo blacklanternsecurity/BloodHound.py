@@ -457,46 +457,96 @@ class AceResolver(object):
     def __init__(self, addomain, resolver):
         self.addomain = addomain
         self.resolver = resolver
+        self.batch_size = 50  # Number of SIDs to resolve in one batch
 
     def resolve_aces(self, aces):
         aces_out = []
+        # First pass: collect all SIDs that need resolution
+        sids_to_resolve = set()
+        for ace in aces:
+            if ace['sid'] not in ADUtils.WELLKNOWN_SIDS:
+                sids_to_resolve.add(ace['sid'])
+
+        # Batch resolve SIDs
+        resolved_sids = {}
+        if sids_to_resolve:
+            # Split into batches
+            sid_batches = [list(sids_to_resolve)[i:i + self.batch_size] 
+                          for i in range(0, len(sids_to_resolve), self.batch_size)]
+            
+            for batch in sid_batches:
+                try:
+                    # Try to resolve each SID in the batch
+                    for sid in batch:
+                        try:
+                            # Check cache first
+                            linkitem = self.addomain.newsidcache.get(sid)
+                            resolved_sids[sid] = linkitem
+                        except KeyError:
+                            # Not in cache, will resolve in batch
+                            pass
+
+                    # Get remaining unresolved SIDs
+                    unresolved = [sid for sid in batch if sid not in resolved_sids]
+                    if unresolved:
+                        # Determine if we need GC for any SIDs in this batch
+                        use_gc = any(not sid.startswith(self.addomain.domain_object.sid) for sid in unresolved)
+                        
+                        # Batch resolve remaining SIDs
+                        for sid in unresolved:
+                            try:
+                                ldapentry = self.resolver.resolve_sid(sid, use_gc)
+                                if ldapentry:
+                                    entry = ADUtils.resolve_ad_entry(ldapentry)
+                                    linkitem = {
+                                        "ObjectIdentifier": entry['objectid'],
+                                        "ObjectType": entry['type'].capitalize()
+                                    }
+                                else:
+                                    # Create a base entry for unresolved SIDs
+                                    linkitem = {
+                                        "ObjectIdentifier": sid,
+                                        "ObjectType": "Base"
+                                    }
+                                resolved_sids[sid] = linkitem
+                                self.addomain.newsidcache.put(sid, linkitem)
+                            except Exception as e:
+                                logging.debug('Error resolving SID %s: %s', sid, str(e))
+                                # Create a base entry for failed resolutions
+                                resolved_sids[sid] = {
+                                    "ObjectIdentifier": sid,
+                                    "ObjectType": "Base"
+                                }
+                except Exception as e:
+                    logging.warning('Error processing SID batch: %s', str(e))
+                    # Create base entries for all SIDs in failed batch
+                    for sid in batch:
+                        if sid not in resolved_sids:
+                            resolved_sids[sid] = {
+                                "ObjectIdentifier": sid,
+                                "ObjectType": "Base"
+                            }
+
+        # Second pass: build ACEs using resolved SIDs
         for ace in aces:
             out = {
                 'RightName': ace['rightname'],
                 'IsInherited': ace['inherited']
             }
-            # Is it a well-known sid?
+            
             if ace['sid'] in ADUtils.WELLKNOWN_SIDS:
                 out['PrincipalSID'] = u'%s-%s' % (self.addomain.domain.upper(), ace['sid'])
                 out['PrincipalType'] = ADUtils.WELLKNOWN_SIDS[ace['sid']][1].capitalize()
             else:
-                try:
-                    linkitem = self.addomain.newsidcache.get(ace['sid'])
-                except KeyError:
-                    # Look it up instead
-                    # Is this SID part of the current domain? If not, use GC
-                    use_gc = not ace['sid'].startswith(self.addomain.domain_object.sid)
-                    ldapentry = self.resolver.resolve_sid(ace['sid'], use_gc)
-                    # Couldn't resolve...
-                    if not ldapentry:
-                        logging.debug('Could not resolve SID: %s', ace['sid'])
-                        # Fake it
-                        entry = {
-                            'type': 'Base',
-                            'objectid': ace['sid']
-                        }
-                    else:
-                        entry = ADUtils.resolve_ad_entry(ldapentry)
-                    linkitem = {
-                        "ObjectIdentifier": entry['objectid'],
-                        "ObjectType": entry['type'].capitalize()
-                    }
-                    # Entries are cached regardless of validity - unresolvable sids
-                    # are not likely to be resolved the second time and this saves traffic
-                    self.addomain.newsidcache.put(ace['sid'], linkitem)
+                linkitem = resolved_sids.get(ace['sid'], {
+                    "ObjectIdentifier": ace['sid'],
+                    "ObjectType": "Base"
+                })
                 out['PrincipalSID'] = ace['sid']
                 out['PrincipalType'] = linkitem['ObjectType']
+            
             aces_out.append(out)
+        
         return aces_out
 
     def resolve_sid(self, sid):
@@ -510,27 +560,33 @@ class AceResolver(object):
             try:
                 linkitem = self.addomain.newsidcache.get(sid)
             except KeyError:
-                # Look it up instead
-                # Is this SID part of the current domain? If not, use GC
-                use_gc = not sid.startswith(self.addomain.domain_object.sid)
-                ldapentry = self.resolver.resolve_sid(sid, use_gc)
-                # Couldn't resolve...
-                if not ldapentry:
-                    logging.debug('Could not resolve SID: %s', sid)
-                    # Fake it
-                    entry = {
-                        'type': 'Base',
-                        'objectid':sid
+                try:
+                    # Is this SID part of the current domain? If not, use GC
+                    use_gc = not sid.startswith(self.addomain.domain_object.sid)
+                    ldapentry = self.resolver.resolve_sid(sid, use_gc)
+                    # Couldn't resolve...
+                    if not ldapentry:
+                        logging.debug('Could not resolve SID: %s', sid)
+                        # Fake it
+                        entry = {
+                            'type': 'Base',
+                            'objectid': sid
+                        }
+                    else:
+                        entry = ADUtils.resolve_ad_entry(ldapentry)
+                    linkitem = {
+                        "ObjectIdentifier": entry['objectid'],
+                        "ObjectType": entry['type'].capitalize()
                     }
-                else:
-                    entry = ADUtils.resolve_ad_entry(ldapentry)
-                linkitem = {
-                    "ObjectIdentifier": entry['objectid'],
-                    "ObjectType": entry['type'].capitalize()
-                }
-                # Entries are cached regardless of validity - unresolvable sids
-                # are not likely to be resolved the second time and this saves traffic
-                self.addomain.newsidcache.put(sid, linkitem)
+                    # Entries are cached regardless of validity - unresolvable sids
+                    # are not likely to be resolved the second time and this saves traffic
+                    self.addomain.newsidcache.put(sid, linkitem)
+                except Exception as e:
+                    logging.debug('Error resolving SID %s: %s', sid, str(e))
+                    linkitem = {
+                        "ObjectIdentifier": sid,
+                        "ObjectType": "Base"
+                    }
             out['ObjectIdentifier'] = sid
             out['ObjectType'] = linkitem['ObjectType']
         return out

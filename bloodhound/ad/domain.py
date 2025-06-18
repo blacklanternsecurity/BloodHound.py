@@ -117,7 +117,7 @@ class ADDC(ADComputer):
                                                      baseDN=self.ad.baseDN, protocol=protocol)
         return self.gcldap is not None
 
-    def search(self, search_filter='(objectClass=*)',attributes=None, search_base=None, generator=True, use_gc=False, use_resolver=False, query_sd=False, is_retry=False,  search_scope=SUBTREE,):
+    def search(self, search_filter='(objectClass=*)',attributes=None, search_base=None, generator=True, use_gc=False, use_resolver=False, query_sd=False, is_retry=False,  search_scope=SUBTREE, page_size=None):
         """
         Search for objects in LDAP or Global Catalog LDAP.
         """
@@ -150,15 +150,15 @@ class ADDC(ADComputer):
                 searcher = self.ldap
 
         hadresults = False
-        # Use configured page size
-        paged_size = self.ad.page_size
+        # Use configured page size if not overridden
+        paged_size = page_size if page_size is not None else self.ad.page_size
         sresult = searcher.extend.standard.paged_search(search_base,
-                                                        search_filter,
-                                                        attributes=attributes,
-                                                        paged_size=paged_size,
-                                                        search_scope=search_scope,
-                                                        controls=controls,
-                                                        generator=generator)
+                                                    search_filter,
+                                                    attributes=attributes,
+                                                    paged_size=paged_size,
+                                                    search_scope=search_scope,
+                                                    controls=controls,
+                                                    generator=generator)
         try:
             # Use a generator for the result regardless of if the search function uses one
             for e in sresult:
@@ -429,45 +429,86 @@ class ADDC(ADComputer):
                               search_base=dn)
         return entries
 
-    def get_users(self, include_properties=False, acl=False):
-
-        properties = ['sAMAccountName', 'distinguishedName', 'sAMAccountType',
-                      'objectSid', 'primaryGroupID', 'isDeleted', 'objectClass']
+    def get_users(self, include_properties=False, acl=False, page_size=None):
+        # Base properties that we always need
+        base_properties = ['sAMAccountName', 'distinguishedName', 'sAMAccountType',
+                          'objectSid', 'primaryGroupID', 'isDeleted', 'objectClass']
+        
+        # Additional properties that we'll fetch in a separate query if needed
+        extended_properties = ['userAccountControl', 'displayName',
+                             'lastLogon', 'lastLogonTimestamp', 'pwdLastSet', 'mail', 'title', 'homeDirectory',
+                             'description', 'userPassword', 'adminCount', 'msDS-AllowedToDelegateTo', 'sIDHistory',
+                             'whencreated', 'unicodepwd', 'scriptpath']
+        
         if 'ms-DS-GroupMSAMembership'.lower() in self.objecttype_guid_map:
-            properties.append('msDS-GroupMSAMembership')
-
+            base_properties.append('msDS-GroupMSAMembership')
+        
         if include_properties:
-            properties += ['userAccountControl', 'displayName',
-                           'lastLogon', 'lastLogonTimestamp', 'pwdLastSet', 'mail', 'title', 'homeDirectory',
-                           'description', 'userPassword', 'adminCount', 'msDS-AllowedToDelegateTo', 'sIDHistory',
-                           'whencreated', 'unicodepwd', 'scriptpath']
+            base_properties.extend(extended_properties)
             if 'unixuserpassword' in self.objecttype_guid_map:
-                properties.append('unixuserpassword')
+                base_properties.append('unixuserpassword')
+        
         if acl:
-            properties.append('nTSecurityDescriptor')
+            base_properties.append('nTSecurityDescriptor')
 
-        # Query for MSA only if server supports it
+        # First, get all regular users
+        regular_users_query = '(&(objectCategory=person)(objectClass=user))'
+        logging.info('Fetching regular users...')
+        regular_users = self.search(regular_users_query,
+                                  base_properties,
+                                  generator=True,
+                                  query_sd=acl,
+                                  page_size=page_size)
+        
+        # Then get GMSA accounts if supported
+        gmsa_entries = []
         if 'msDS-GroupManagedServiceAccount' in self.ldap.server.schema.object_classes:
-            gmsa_filter = '(objectClass=msDS-GroupManagedServiceAccount)'
-        else:
-            logging.debug('No support for GMSA, skipping in query')
-            gmsa_filter = ''
-
+            logging.info('Fetching GMSA accounts...')
+            gmsa_query = '(objectClass=msDS-GroupManagedServiceAccount)'
+            try:
+                gmsa_entries = self.search(gmsa_query,
+                                         base_properties,
+                                         generator=True,
+                                         query_sd=acl,
+                                         page_size=page_size)
+            except Exception as e:
+                logging.warning('Failed to fetch GMSA accounts: %s', str(e))
+        
+        # Finally get SMSA accounts if supported
+        smsa_entries = []
         if 'msDS-ManagedServiceAccount' in self.ldap.server.schema.object_classes:
-            smsa_filter = '(objectClass=msDS-ManagedServiceAccount)'
-        else:
-            logging.debug('No support for SMSA, skipping in query')
-            smsa_filter = ''
-
-        if gmsa_filter or smsa_filter:
-            query = '(|(&(objectCategory=person)(objectClass=user)){}{})'.format(gmsa_filter, smsa_filter)
-        else:
-            query = '(&(objectCategory=person)(objectClass=user))'
-        entries = self.search(query,
-                              properties,
-                              generator=True,
-                              query_sd=acl)
-        return entries
+            logging.info('Fetching SMSA accounts...')
+            smsa_query = '(objectClass=msDS-ManagedServiceAccount)'
+            try:
+                smsa_entries = self.search(smsa_query,
+                                         base_properties,
+                                         generator=True,
+                                         query_sd=acl,
+                                         page_size=page_size)
+            except Exception as e:
+                logging.warning('Failed to fetch SMSA accounts: %s', str(e))
+        
+        # Combine all results
+        all_entries = []
+        try:
+            for entry in regular_users:
+                all_entries.append(entry)
+        except Exception as e:
+            logging.warning('Error processing regular users: %s', str(e))
+        
+        try:
+            for entry in gmsa_entries:
+                all_entries.append(entry)
+        except Exception as e:
+            logging.warning('Error processing GMSA accounts: %s', str(e))
+        
+        try:
+            for entry in smsa_entries:
+                all_entries.append(entry)
+        except Exception as e:
+            logging.warning('Error processing SMSA accounts: %s', str(e))
+        
+        return all_entries
 
 
     def get_computers(self, include_properties=False, acl=False):
