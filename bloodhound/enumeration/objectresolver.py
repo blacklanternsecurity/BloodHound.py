@@ -60,16 +60,55 @@ class ObjectResolver(object):
                                                           attributes=['sAMAccountName', 'distinguishedName', 'sAMAccountType', 'objectSid', 'name'])
             return distinguishedname
 
+    def _parse_spn_username(self, username):
+        """
+        Parse a username that might be an SPN (Service Principal Name).
+        SPNs can have formats like:
+        - HTTP/server.domain.com/serviceaccount
+        - HTTP/server.domain.com
+        - CIFS/server.domain.com/serviceaccount
+        - serviceaccount (regular username)
+        
+        Returns the actual account name or the original username if not an SPN.
+        """
+        # Check if this looks like an SPN (contains forward slashes)
+        if '/' in username:
+            parts = username.split('/')
+            # Common SPN formats:
+            # SERVICE/HOST/ACCOUNT -> return ACCOUNT
+            # SERVICE/HOST -> return HOST (computer account)
+            if len(parts) >= 3:
+                # SERVICE/HOST/ACCOUNT format - return the account name
+                return parts[2]
+            elif len(parts) == 2:
+                # SERVICE/HOST format - this is likely a computer account
+                # Extract just the hostname without domain suffix
+                host = parts[1]
+                if '.' in host:
+                    return host.split('.')[0] + '$'  # Add $ for computer account
+                else:
+                    return host + '$'
+        
+        # Not an SPN, return as-is
+        return username
+
     def resolve_samname(self, samname, use_gc=True, allow_filter=False):
         """
         Resolve a SAM name in the GC. This can give multiple results.
         Returns a list of LDAP entries
         """
+        # Parse potential SPN to extract actual account name
+        parsed_samname = self._parse_spn_username(samname)
+        
+        # If we parsed an SPN, log the transformation
+        if parsed_samname != samname:
+            logging.debug('[SAM_RESOLVE] Parsed SPN "%s" to account name "%s"', samname, parsed_samname)
+        
         out = []
         if not allow_filter:
-            safename = escape_filter_chars(samname)
+            safename = escape_filter_chars(parsed_samname)
         else:
-            safename = samname
+            safename = parsed_samname
         
         with self.lock:
             if use_gc:
@@ -114,7 +153,10 @@ class ObjectResolver(object):
                             continue
                 
                 if entry_count == 0:
-                    logging.warning('[SAM_RESOLVE] Could not find user %s in any domain of the forest', samname)
+                    if parsed_samname != samname:
+                        logging.warning('[SAM_RESOLVE] Could not find user %s (parsed from SPN "%s") in any domain of the forest', parsed_samname, samname)
+                    else:
+                        logging.warning('[SAM_RESOLVE] Could not find user %s in any domain of the forest', samname)
                 
             except Exception as e:
                 logging.error('[SAM_RESOLVE] LDAP search failed for SAM name %s: %s', samname, str(e))
