@@ -70,22 +70,55 @@ class ObjectResolver(object):
             safename = escape_filter_chars(samname)
         else:
             safename = samname
+        
         with self.lock:
             if use_gc:
                 if not self.addc.gcldap:
                     if not self.addc.gc_connect():
                         # Error connecting, bail
+                        logging.warning('[SAM_RESOLVE] Failed to establish GC connection for SAM name %s', samname)
                         return None
-                logging.debug('Querying GC for SAM Name %s', samname)
-            else:
-                logging.debug('Querying LDAP for SAM Name %s', samname)
-            entries = self.addc.search(search_base="",
-                                       search_filter='(sAMAccountName=%s)' % safename,
-                                       use_gc=use_gc,
-                                       attributes=['sAMAccountName', 'distinguishedName', 'sAMAccountType', 'objectSid', 'name'])
-            # This uses a generator, however we return a list
-            for entry in entries:
-                out.append(entry)
+            
+            try:
+                # First try searching the entire forest (empty base)
+                entries = self.addc.search(search_base="",
+                                           search_filter='(sAMAccountName=%s)' % safename,
+                                           use_gc=use_gc,
+                                           attributes=['sAMAccountName', 'distinguishedName', 'sAMAccountType', 'objectSid', 'name'])
+                # This uses a generator, however we return a list
+                entry_count = 0
+                for entry in entries:
+                    out.append(entry)
+                    entry_count += 1
+                
+                # If no results and we're using GC, try searching each domain individually
+                if entry_count == 0 and use_gc and hasattr(self.addc.ad, 'domains'):
+                    logging.debug('[SAM_RESOLVE] Forest-wide search failed for %s, trying individual domain searches...', samname)
+                    for domain_base, domain_info in self.addc.ad.domains.items():
+                        domain_name = domain_info.get('attributes', {}).get('name', domain_base)
+                        logging.debug('[SAM_RESOLVE] Searching domain %s for %s', domain_name, samname)
+                        try:
+                            domain_entries = self.addc.search(search_base=domain_base,
+                                                             search_filter='(sAMAccountName=%s)' % safename,
+                                                             use_gc=use_gc,
+                                                             attributes=['sAMAccountName', 'distinguishedName', 'sAMAccountType', 'objectSid', 'name'])
+                            domain_entry_count = 0
+                            for entry in domain_entries:
+                                out.append(entry)
+                                entry_count += 1
+                                domain_entry_count += 1
+                            if domain_entry_count > 0:
+                                logging.debug('[SAM_RESOLVE] Found %s in domain %s', samname, domain_name)
+                        except Exception as domain_e:
+                            logging.warning('[SAM_RESOLVE] Failed to search domain %s for %s: %s', domain_name, samname, str(domain_e))
+                            continue
+                
+                if entry_count == 0:
+                    logging.warning('[SAM_RESOLVE] Could not find user %s in any domain of the forest', samname)
+                
+            except Exception as e:
+                logging.error('[SAM_RESOLVE] LDAP search failed for SAM name %s: %s', samname, str(e))
+                return None
 
         return out
 

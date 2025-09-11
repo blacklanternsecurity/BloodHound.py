@@ -168,6 +168,8 @@ class ComputerEnumerator(MembershipEnumerator):
                         entries = self.addomain.objectresolver.resolve_samname(ses['user'], use_gc=use_gc)
                         if entries is not None:
                             users = [user['attributes']['objectSid'] for user in entries]
+                        else:
+                            users = []
                         if entries is None or users == []:
                             logging.warning('Failed to resolve SAM name %s in current forest', ses['user'])
                             continue
@@ -227,6 +229,8 @@ class ComputerEnumerator(MembershipEnumerator):
                                     logging.debug('Skipping resolved user %s since domain does not match (%s != %s)', edn, edom, userdomain.lower())
                             else:
                                 users = [resolved_user['attributes']['objectSid'] for resolved_user in entries]
+                        else:
+                            users = []
                         if entries is None or users == []:
                             logging.warning('Failed to resolve SAM name %s in current forest', samname)
                             continue

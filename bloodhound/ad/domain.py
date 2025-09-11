@@ -90,6 +90,8 @@ class ADDC(ADComputer):
                 logging.error('Could not find a Global Catalog in this domain!'\
                               ' Resolving will be unreliable in forests with multiple domains')
                 return False
+        
+        ip = None
         try:
             # Convert the hostname to an IP, this prevents ldap3 from doing it
             # which doesn't use our custom nameservers
@@ -97,7 +99,9 @@ class ADDC(ADComputer):
             q = self.ad.dnsresolver.query(initial_server, tcp=self.ad.dns_tcp)
             for r in q:
                 ip = r.address
-        except (resolver.NXDOMAIN, resolver.Timeout):
+                break
+        except (resolver.NXDOMAIN, resolver.Timeout) as e:
+            logging.warning('Failed to resolve GC server %s: %s', initial_server, str(e))
             for server in self.ad.gcs():
                 # Skip the one we already tried
                 if server == initial_server:
@@ -110,12 +114,27 @@ class ADDC(ADComputer):
                     for r in q:
                         ip = r.address
                         break
-                except (resolver.NXDOMAIN, resolver.Timeout):
+                    if ip:
+                        initial_server = server
+                        break
+                except (resolver.NXDOMAIN, resolver.Timeout) as e:
+                    logging.warning('Failed to resolve alternative GC server %s: %s', server, str(e))
                     continue
-
-        self.gcldap = self.ad.auth.getLDAPConnection(hostname=self.hostname, ip=ip, gc=True,
-                                                     baseDN=self.ad.baseDN, protocol=protocol)
-        return self.gcldap is not None
+        
+        if ip is None:
+            logging.error('Failed to resolve any GC server to an IP address')
+            return False
+        
+        try:
+            self.gcldap = self.ad.auth.getLDAPConnection(hostname=self.hostname, ip=ip, gc=True,
+                                                         baseDN=self.ad.baseDN, protocol=protocol)
+            success = self.gcldap is not None
+            if not success:
+                logging.error('Failed to establish GC LDAP connection')
+            return success
+        except Exception as e:
+            logging.error('Exception during GC LDAP connection: %s', str(e))
+            return False
 
     def search(self, search_filter='(objectClass=*)',attributes=None, search_base=None, generator=True, use_gc=False, use_resolver=False, query_sd=False, is_retry=False,  search_scope=SUBTREE,):
         """
