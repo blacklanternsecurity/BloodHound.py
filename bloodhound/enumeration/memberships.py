@@ -309,7 +309,7 @@ class MembershipEnumerator(object):
                 else:
                     group['Properties']['whencreated'] = calendar.timegm(whencreated.timetuple())
 
-            for member in entry['attributes']['member']:
+            for member in entry['attributes'].get('member', []):
                 resolved_member = self.get_membership(member)
                 if resolved_member:
                     group['Members'].append(resolved_member)
@@ -673,7 +673,10 @@ class MembershipEnumerator(object):
             if with_properties:
                 container["Properties"]["description"] = ADUtils.get_entry_property(entry, 'description', '')
                 whencreated = ADUtils.get_entry_property(entry, 'whencreated', default=0)
-                container["Properties"]["whencreated"] =  calendar.timegm(whencreated.timetuple())
+                if isinstance(whencreated, int):
+                    container["Properties"]["whencreated"] = whencreated
+                else:
+                    container["Properties"]["whencreated"] = calendar.timegm(whencreated.timetuple())
             
             for childentry in self.addc.get_childobjects(container["Properties"]["distinguishedname"]):
                 if ADUtils.is_filtered_container_child(ADUtils.get_entry_property(childentry, 'distinguishedName')):
