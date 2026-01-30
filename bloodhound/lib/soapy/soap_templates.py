@@ -44,6 +44,7 @@ LDAP_QUERY_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap
             <ad:Selection Dialect="http://schemas.microsoft.com/2008/1/ActiveDirectory/Dialect/XPath-Level-1">
                 {attributes}
             </ad:Selection>
+            <wsen:MaxElements>256</wsen:MaxElements>
         </wsen:Enumerate>
     </s:Body>
 </s:Envelope>"""
