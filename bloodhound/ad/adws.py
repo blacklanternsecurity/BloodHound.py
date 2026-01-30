@@ -187,7 +187,7 @@ class ADWSClient:
         if self._client is None:
             self.connect()
 
-        if search_base is None:
+        if not search_base:  # Handle None and empty string
             search_base = self.ad.baseDN
 
         # ADWS requires explicit attribute lists - provide minimal defaults if none specified

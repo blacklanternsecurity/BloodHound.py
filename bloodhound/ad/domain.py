@@ -228,7 +228,7 @@ class ADDC(ADComputer):
             if self._adws_client is None:
                 self.adws_connect()
 
-            if search_base is None:
+            if not search_base:  # Handle None and empty string
                 search_base = self.ad.baseDN
 
             # Convert attributes to list if needed
