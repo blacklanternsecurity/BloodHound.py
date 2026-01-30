@@ -172,7 +172,7 @@ class ADWSClient:
         if search_base is None:
             search_base = self.ad.baseDN
 
-        if attributes is None:
+        if attributes is None or len(attributes) == 0:
             attr_list = ["*"]
         elif isinstance(attributes, str):
             attr_list = [attributes]
