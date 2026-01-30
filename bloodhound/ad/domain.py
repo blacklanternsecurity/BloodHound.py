@@ -60,12 +60,12 @@ class ADDC(ADComputer):
         """
         Connect to the ADWS service on port 9389.
         """
-        # Skip if already connected
-        if self._adws_client is not None:
-            return True
-
         from bloodhound.ad.adws import ADWSClient
-        logging.info('Connecting to ADWS at %s:9389', self.hostname)
+
+        # Only log INFO on first connection
+        first_connect = self._adws_client is None
+        if first_connect:
+            logging.info('Connecting to ADWS at %s:9389', self.hostname)
 
         # Resolve hostname to IP
         ip = None
@@ -84,7 +84,8 @@ class ADDC(ADComputer):
 
         self._adws_client = ADWSClient(ip, self.ad)
         self._adws_client.connect()
-        logging.info('Successfully connected to ADWS')
+        if first_connect:
+            logging.info('Successfully connected to ADWS')
         return True
 
     def ldap_connect(self, protocol=None, resolver=False):
