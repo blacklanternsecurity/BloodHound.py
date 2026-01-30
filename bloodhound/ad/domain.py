@@ -508,7 +508,11 @@ class ADDC(ADComputer):
             if not entry['attributes']['systemFlags']:
                 continue
             # This is a naming context, but not a domain
-            if not entry['attributes']['systemFlags'] & 2:
+            # Convert to int if string (ADWS returns strings, LDAP returns ints)
+            system_flags = entry['attributes']['systemFlags']
+            if isinstance(system_flags, str):
+                system_flags = int(system_flags)
+            if not system_flags & 2:
                 continue
             entry['attributes']['distinguishedName'] = entry['attributes']['nCName']
             entriesNum += 1
