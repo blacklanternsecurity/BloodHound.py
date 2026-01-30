@@ -232,8 +232,10 @@ class ADDC(ADComputer):
                 search_base = self.ad.baseDN
 
             # Convert attributes to list if needed
+            # ADWS requires explicit attribute lists - it doesn't handle empty lists well
             if attributes is None or attributes == []:
-                attr_list = None  # ADWS will use default
+                # Provide minimal default attributes for ADWS
+                attr_list = ['distinguishedName', 'objectSid', 'objectClass']
             elif isinstance(attributes, str):
                 attr_list = [attributes]
             else:

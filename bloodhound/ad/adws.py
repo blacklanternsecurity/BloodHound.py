@@ -172,8 +172,9 @@ class ADWSClient:
         if search_base is None:
             search_base = self.ad.baseDN
 
+        # ADWS requires explicit attribute lists - provide minimal defaults if none specified
         if attributes is None or len(attributes) == 0:
-            attr_list = ["*"]
+            attr_list = ['distinguishedName', 'objectSid', 'objectClass']
         elif isinstance(attributes, str):
             attr_list = [attributes]
         else:
@@ -214,8 +215,9 @@ class ADWSClient:
         if self._client is None:
             self.connect()
 
-        if attributes is None:
-            attr_list = ["*"]
+        # ADWS requires explicit attribute lists - provide minimal defaults if none specified
+        if attributes is None or len(attributes) == 0:
+            attr_list = ['distinguishedName', 'objectSid', 'objectClass']
         else:
             attr_list = list(attributes)
 
