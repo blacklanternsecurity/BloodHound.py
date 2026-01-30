@@ -103,14 +103,14 @@ class ADWSClient:
             raise CollectionException("ADWS requires password or NT hash for authentication")
 
         try:
-            logging.info('Connecting to ADWS server: %s', self.hostname)
+            logging.debug('Connecting to ADWS server: %s', self.hostname)
             self._client = ADWSConnect.pull_client(
                 ip=self.hostname,
                 domain=self.ad.domain,
                 username=auth.username,
                 auth=adws_auth,
             )
-            logging.info('Successfully connected to ADWS')
+            logging.debug('Successfully connected to ADWS')
         except Exception as e:
             logging.error('ADWS connection failed: %s', str(e))
             raise CollectionException(f'ADWS connection failed: {e}. No LDAP fallback in ADWS mode.')

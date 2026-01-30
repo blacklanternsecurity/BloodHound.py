@@ -274,7 +274,7 @@ class ADWSConnect:
     def _connect(self, remoteName: str, resource: str) -> ms_nmf.NMFConnection:
         """Connect to the specified ADWS endpoint."""
         server_address: tuple[str, int] = (remoteName, 9389)
-        logging.info(f"Connecting to ADWS at {remoteName}:9389 for {self._resource}")
+        logging.debug(f"Connecting to ADWS at {remoteName}:9389 for {self._resource}")
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(server_address)

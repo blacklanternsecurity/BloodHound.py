@@ -61,7 +61,7 @@ class ADDC(ADComputer):
         Connect to the ADWS service on port 9389.
         """
         from bloodhound.ad.adws import ADWSClient
-        logging.info('Connecting to ADWS server: %s' % self.hostname)
+        logging.info('Connecting to ADWS at %s:9389', self.hostname)
 
         # Resolve hostname to IP
         ip = None
@@ -69,6 +69,7 @@ class ADDC(ADComputer):
             q = self.ad.dnsresolver.resolve(self.hostname, 'A', tcp=self.ad.dns_tcp)
             for rdata in q:
                 ip = rdata.address
+                logging.debug('Resolved %s to %s', self.hostname, ip)
                 break
         except:
             pass
@@ -79,6 +80,7 @@ class ADDC(ADComputer):
 
         self._adws_client = ADWSClient(ip, self.ad)
         self._adws_client.connect()
+        logging.info('Successfully connected to ADWS')
         return True
 
     def ldap_connect(self, protocol=None, resolver=False):
