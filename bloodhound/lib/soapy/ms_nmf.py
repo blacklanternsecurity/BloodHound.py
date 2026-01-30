@@ -431,7 +431,8 @@ class NMFConnection:
         self._throw_if_not(NMFUpgradeResponse, self._recv())
 
         # nns auth - use Kerberos if target is set, otherwise NTLM
-        if self._nns._kerberos_target is not None:
+        # Use getattr for NTLM-only builds that don't have _kerberos_target
+        if getattr(self._nns, '_kerberos_target', None) is not None:
             self._nns.auth_kerberos()
         else:
             self._nns.auth_ntlm()
