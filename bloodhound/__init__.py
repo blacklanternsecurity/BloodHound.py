@@ -60,7 +60,7 @@ class BloodHound(object):
             logging.debug('Using kerberos realm: %s', self.ad.realm())
 
         # Create a domain controller object
-        self.pdc = ADDC(pdc, self.ad)
+        self.pdc = ADDC(pdc, self.ad, use_adws=self.ad.use_adws)
         # Create an object resolver
         self.ad.create_objectresolver(self.pdc)
 
@@ -263,6 +263,9 @@ def main():
     coopts.add_argument('--use-ldaps',
                         action='store_true',
                         help='Use LDAP over TLS on port 636 by default')
+    coopts.add_argument('--use-adws',
+                        action='store_true',
+                        help='Use ADWS (port 9389) instead of LDAP for DC queries. No LDAP fallback.')
     coopts.add_argument('-op',
                         '--outputprefix',
                         metavar='PREFIX_NAME',
@@ -303,7 +306,7 @@ def main():
             args.auth_method = 'kerberos'
             auth = ADAuthentication(username=args.username, password=args.password, domain=args.domain, auth_method=args.auth_method, ldap_channel_binding=args.ldap_channel_binding)
 
-    ad = AD(auth=auth, domain=args.domain, nameserver=args.nameserver, dns_tcp=args.dns_tcp, dns_timeout=args.dns_timeout, use_ldaps=args.use_ldaps)
+    ad = AD(auth=auth, domain=args.domain, nameserver=args.nameserver, dns_tcp=args.dns_tcp, dns_timeout=args.dns_timeout, use_ldaps=args.use_ldaps, use_adws=args.use_adws)
     # Resolve collection methods
     collect = resolve_collection_methods(args.collectionmethod)
     if not collect:
