@@ -351,7 +351,7 @@ class ADWSConnect:
 
     def _handle_str_to_xml(self, xmlstr: str) -> ElementTree.Element | None:
         """Takes an xml string and returns an Element of the root node."""
-        if ":Fault>" and ":Reason>" not in xmlstr:
+        if ":Fault>" not in xmlstr and ":Reason>" not in xmlstr:
             return ElementTree.fromstring(xmlstr)
 
         def manually_cut_out_fault(xml_str: str) -> str:
