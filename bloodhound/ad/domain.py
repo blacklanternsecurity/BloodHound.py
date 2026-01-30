@@ -60,6 +60,10 @@ class ADDC(ADComputer):
         """
         Connect to the ADWS service on port 9389.
         """
+        # Skip if already connected
+        if self._adws_client is not None:
+            return True
+
         from bloodhound.ad.adws import ADWSClient
         logging.info('Connecting to ADWS at %s:9389', self.hostname)
 

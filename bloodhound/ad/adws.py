@@ -92,6 +92,10 @@ class ADWSClient:
         Raises:
             CollectionException: If connection fails
         """
+        # Skip if already connected
+        if self._client is not None:
+            return
+
         auth = self.ad.auth
 
         # Create NTLMAuth from BloodHound credentials
