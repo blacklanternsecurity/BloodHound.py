@@ -54,6 +54,24 @@ class ADWSClient:
         "objectClass",
     }
 
+    # Attributes that should be converted to integers (ADWS returns strings)
+    INTEGER_ATTRIBUTES = {
+        "userAccountControl",
+        "systemFlags",
+        "sAMAccountType",
+        "groupType",
+        "primaryGroupID",
+        "instanceType",
+        "msDS-SupportedEncryptionTypes",
+        "trustDirection",
+        "trustType",
+        "trustAttributes",
+        "searchFlags",
+        "adminCount",
+        "logonCount",
+        "badPwdCount",
+    }
+
     def __init__(self, hostname: str, ad: "AD"):
         """
         Initialize ADWS client.
@@ -344,6 +362,14 @@ class ADWSClient:
                     raw_values = [b64decode(v) for v in values]
                     values = raw_values
                 except Exception:
+                    pass
+
+            # Convert integer attributes from string to int
+            elif attr_name in self.INTEGER_ATTRIBUTES:
+                try:
+                    values = [int(v) for v in values]
+                    raw_values = values
+                except (ValueError, TypeError):
                     pass
 
             else:
