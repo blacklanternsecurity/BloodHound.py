@@ -309,7 +309,7 @@ class MembershipEnumerator(object):
                 else:
                     group['Properties']['whencreated'] = calendar.timegm(whencreated.timetuple())
 
-            for member in entry['attributes']['member']:
+            for member in entry['attributes'].get('member', []):
                 resolved_member = self.get_membership(member)
                 if resolved_member:
                     group['Members'].append(resolved_member)
