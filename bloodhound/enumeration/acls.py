@@ -38,7 +38,7 @@ EXTRIGHTS_GUID_MAPPING = {
     "UserForceChangePassword": string_to_bin("00299570-246d-11d0-a768-00aa006e0529"),
     "AllowedToAct": string_to_bin("3f78c3e5-f79a-46bd-a0b8-9d18116ddc79"),
     "UserAccountRestrictionsSet": string_to_bin("4c164200-20c0-11d0-a768-00aa006e0529"),
-    "WriteGPLink": string_to_bin("f30e3bbf-9ff0-11d1-b603-0000f80367c1")
+    "WriteGPLink": string_to_bin("f30e3bbe-9ff0-11d1-b603-0000f80367c1")
 }
 
 def parse_binary_acl(entry, entrytype, acl, objecttype_guid_map):
@@ -138,7 +138,7 @@ def parse_binary_acl(entry, entrytype, acl, objecttype_guid_map):
                 if entrytype == 'computer' and can_write_property(ace_object, EXTRIGHTS_GUID_MAPPING['AllowedToAct']):
                     relations.append(build_relation(sid, 'AddAllowedToAct', '', inherited=is_inherited))
                 # Property set, but ignore Domain Admins since they already have enough privileges anyway
-                if entrytype == 'computer' and can_write_property(ace_object, EXTRIGHTS_GUID_MAPPING['UserAccountRestrictionsSet']) and not sid.endswith('-512'):
+                if entrytype in ['computer', 'user'] and can_write_property(ace_object, EXTRIGHTS_GUID_MAPPING['UserAccountRestrictionsSet']) and not sid.endswith('-512'):
                     relations.append(build_relation(sid, 'WriteAccountRestrictions', '', inherited=is_inherited))
                 if entrytype == 'organizational-unit' and can_write_property(ace_object, EXTRIGHTS_GUID_MAPPING['WriteGPLink']):
                     relations.append(build_relation(sid, 'WriteGPLink', '', inherited=is_inherited))
@@ -188,7 +188,7 @@ def parse_binary_acl(entry, entrytype, acl, objecttype_guid_map):
                     relations.append(build_relation(sid, 'GetChangesAll', '', inherited=is_inherited))
                 if entrytype == 'domain' and has_extended_right(ace_object, EXTRIGHTS_GUID_MAPPING['GetChangesInFilteredSet']):
                     relations.append(build_relation(sid, 'GetChangesInFilteredSet', '', inherited=is_inherited))
-                if entrytype == 'user' and has_extended_right(ace_object, EXTRIGHTS_GUID_MAPPING['UserForceChangePassword']):
+                if entrytype in ['user', 'computer'] and has_extended_right(ace_object, EXTRIGHTS_GUID_MAPPING['UserForceChangePassword']):
                     relations.append(build_relation(sid, 'ForceChangePassword', '', inherited=is_inherited))
 
         if ace_object.ace.AceType == 0x00:
