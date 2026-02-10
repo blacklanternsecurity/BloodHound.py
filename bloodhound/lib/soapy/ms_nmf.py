@@ -400,6 +400,9 @@ class NMFConnection:
 
         self._encoder = Encoder(self._encoding)
 
+        # Buffer for TCP stream reassembly
+        self._recv_buffer: bytes = b""
+
     def _throw_if_not(self, expected: Type[NMFRecord], got: NMFRecord):
         """Allows for quick validation of expected responses.  If not expected
         checks for fault, and throws
@@ -527,9 +530,47 @@ class NMFConnection:
             0xC: NMFPreambleEnd,
         }
 
-        data: bytes = self._transport.recv(4096)
+        # Read from network until we have at least 1 byte for record type
+        while len(self._recv_buffer) < 1:
+            chunk = self._transport.recv(4096)
+            if not chunk:
+                raise ConnectionError("Connection closed by peer")
+            self._recv_buffer += chunk
 
-        record_type: int = data[0]
+        record_type: int = self._recv_buffer[0]
 
-        # simplifed object factory, takes type and returns NMFRecords
-        return jump_table.get(record_type, NMFUnknownRecord)(data=data)
+        # Determine how much data this record needs
+        record_class = jump_table.get(record_type, NMFUnknownRecord)
+
+        # For variable-length records, we need to decode the size first
+        if record_type in (0x2, 0x6, 0x8, 0x9):  # VIA, SIZED_ENVELOPE, FAULT, UPGRADE_REQUEST
+            # Need at least 2 bytes (type + first size byte) to start decoding size
+            while len(self._recv_buffer) < 2:
+                chunk = self._transport.recv(4096)
+                if not chunk:
+                    raise ConnectionError("Connection closed by peer")
+                self._recv_buffer += chunk
+
+            # Decode the size field
+            size, size_len, _ = NMFRecord.decode_size(self._recv_buffer[1:])
+            record_length = 1 + size_len + size  # type byte + size field + payload
+        elif record_type == 0x0:  # VERSION
+            record_length = 3
+        elif record_type in (0x1, 0x3):  # MODE, KNOWN_ENCODING
+            record_length = 2
+        else:  # END, UPGRADE_RESPONSE, PREAMBLE_ACK, PREAMBLE_END
+            record_length = 1
+
+        # Read until we have the full record
+        while len(self._recv_buffer) < record_length:
+            chunk = self._transport.recv(4096)
+            if not chunk:
+                raise ConnectionError("Connection closed by peer")
+            self._recv_buffer += chunk
+
+        # Extract exactly one record
+        record_data = self._recv_buffer[:record_length]
+        self._recv_buffer = self._recv_buffer[record_length:]
+
+        # Parse and return the record
+        return record_class(data=record_data)
