@@ -335,11 +335,23 @@ class NNS:
         """
         key = self._krb_session_key
 
-        # Strip MechIndepToken wrapper if present (Windows may use it for RC4)
+        # Strip MechIndepToken (APPLICATION 0 = 0x60) wrapper if present.
+        # We parse manually because impacket's MechIndepToken.from_bytes()
+        # has a BER short-form length bug in get_length() that causes a
+        # 4-byte data misalignment when inner length < 128.
         if payload[0:1] == b'\x60':
-            from impacket.krb5.gssapi import MechIndepToken
-            mit = MechIndepToken.from_bytes(payload)
-            payload = mit.data
+            idx = 1
+            # Parse BER definite-length encoding
+            if payload[idx] < 0x80:
+                idx += 1  # Short form: single byte is the length
+            else:
+                num_len_bytes = payload[idx] & 0x7F
+                idx += 1 + num_len_bytes  # Long form: skip length bytes
+            # Skip OID (tag 0x06 + 1-byte length + OID data bytes)
+            if payload[idx] == 0x06:
+                oid_data_len = payload[idx + 1]
+                idx += 2 + oid_data_len
+            payload = payload[idx:]
 
         # Parse 32-byte WRAP header:
         # header_prefix(8) + SND_SEQ(8) + SGN_CKSUM(8) + Confounder(8)
