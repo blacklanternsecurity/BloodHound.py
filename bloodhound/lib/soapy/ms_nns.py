@@ -396,7 +396,17 @@ class NNS:
                 spnego_resp = SPNEGO_NegTokenResp(server_payload)
                 ap_rep_data = spnego_resp['ResponseToken']
                 if ap_rep_data and len(ap_rep_data) > 0:
-                    ap_rep = decoder.decode(bytes(ap_rep_data), asn1Spec=AP_REP())[0]
+                    raw_token = bytes(ap_rep_data)
+                    # The ResponseToken may be wrapped in a GSS-API InitialContextToken
+                    # (APPLICATION 0 = 0x60) containing an OID + optional token-id + AP_REP.
+                    # We need to find the actual AP_REP (APPLICATION 15 = 0x6F) inside.
+                    if raw_token[0] != 0x6F:
+                        ap_rep_idx = raw_token.find(b'\x6f')
+                        if ap_rep_idx >= 0:
+                            raw_token = raw_token[ap_rep_idx:]
+                        else:
+                            raise ValueError('No AP_REP (0x6F) found in ResponseToken')
+                    ap_rep = decoder.decode(raw_token, asn1Spec=AP_REP())[0]
                     enc_part = ap_rep['enc-part']
                     # Decrypt AP_REP enc-part with TGS session key (key usage 12)
                     dec_part = cipher.decrypt(sessionkey, 12, bytes(enc_part['cipher']))
