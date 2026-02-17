@@ -384,7 +384,7 @@ class NNS:
         AP_REQ manually, wraps it in SPNEGO, and negotiates via NNS handshake.
         After authentication, sets up GSS-API wrap/unwrap for channel encryption.
         """
-        logging.info('Authenticating to ADWS via Kerberos')
+        logging.debug('Authenticating to ADWS via Kerberos')
 
         # Step 1: Get TGS for HOST/<fqdn>
         servername = Principal(
@@ -500,8 +500,6 @@ class NNS:
         elif NNS_msg_resp["message_id"] != MessageID.DONE:
             raise SystemExit(f"[-] Kerberos Auth: Unexpected message ID: 0x{NNS_msg_resp['message_id']:02x}")
 
-        logging.debug('Kerberos authentication successful')
-
         # Step 10: Process AP_REP to extract subkey (if present)
         # The server's response contains a SPNEGO NegTokenResp wrapping an AP_REP.
         # The AP_REP may contain a subkey that MUST be used for subsequent encryption.
@@ -532,12 +530,8 @@ class NNS:
                         subkey_type = int(enc_ap_rep['subkey']['keytype'])
                         subkey_value = bytes(enc_ap_rep['subkey']['keyvalue'])
                         enc_key = KerberosKey(subkey_type, subkey_value)
-                        logging.debug('Using subkey from AP_REP (etype %d, %d bytes)',
-                                     subkey_type, len(subkey_value))
-                    else:
-                        logging.debug('No subkey in AP_REP, using TGS session key')
             except Exception as e:
-                logging.debug('Could not process AP_REP for subkey: %s', e)
+                logging.warning('Could not process AP_REP for subkey: %s', e)
 
         # Step 11: Set up GSS-API wrap/unwrap for channel encryption
         # GSSAPI() factory only checks .enctype on the passed object to select the
