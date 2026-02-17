@@ -254,6 +254,7 @@ class ADWSConnect:
         username: str,
         auth: NTLMAuth | KerberosAuth,
         resource: str,
+        target_ip: str | None = None,
     ):
         """Creates an ADWS client connection to the specified endpoint.
 
@@ -263,8 +264,10 @@ class ADWSConnect:
             username: user to auth as
             auth: auth mechanism to use (NTLMAuth or KerberosAuth)
             resource: the resource dictates what endpoint the client connects to
+            target_ip: resolved IP address for TCP connection (uses fqdn if not set)
         """
         self._fqdn = fqdn
+        self._target_ip = target_ip or fqdn
         self._domain = domain
         self._username = username
         self._auth = auth
@@ -297,8 +300,9 @@ class ADWSConnect:
 
     def _connect(self, remoteName: str, resource: str) -> ms_nmf.NMFConnection:
         """Connect to the specified ADWS endpoint."""
-        server_address: tuple[str, int] = (remoteName, 9389)
-        logging.debug(f"Connecting to ADWS at {remoteName}:9389 for {self._resource}")
+        connect_host = self._target_ip
+        server_address: tuple[str, int] = (connect_host, 9389)
+        logging.debug(f"Connecting to ADWS at {connect_host}:9389 for {self._resource}")
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(server_address)
@@ -493,9 +497,9 @@ class ADWSConnect:
         return results
 
     @classmethod
-    def pull_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth) -> Self:
-        return cls(ip, domain, username, auth, "Enumeration")
+    def pull_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth, target_ip: str | None = None) -> Self:
+        return cls(ip, domain, username, auth, "Enumeration", target_ip=target_ip)
 
     @classmethod
-    def put_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth) -> Self:
-        return cls(ip, domain, username, auth, "Resource")
+    def put_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth, target_ip: str | None = None) -> Self:
+        return cls(ip, domain, username, auth, "Resource", target_ip=target_ip)

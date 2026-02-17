@@ -72,15 +72,17 @@ class ADWSClient:
         "badPwdCount",
     }
 
-    def __init__(self, hostname: str, ad: "AD"):
+    def __init__(self, hostname: str, ad: "AD", target_ip: str | None = None):
         """
         Initialize ADWS client.
 
         Args:
-            hostname: DC hostname or IP to connect to
+            hostname: DC FQDN for SPN construction and NMF via
             ad: BloodHound AD object containing auth and domain info
+            target_ip: Resolved IP for TCP connection (uses hostname if not set)
         """
         self.hostname = hostname
+        self.target_ip = target_ip
         self.ad = ad
         self._client: Optional[ADWSConnect] = None
         self._schema_classes: Optional[set] = None
@@ -115,6 +117,7 @@ class ADWSClient:
                 domain=self.ad.domain,
                 username=auth.username,
                 auth=adws_auth,
+                target_ip=self.target_ip,
             )
             logging.debug('Successfully connected to ADWS')
         except Exception as e:
