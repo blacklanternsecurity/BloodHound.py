@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Generator
 from uuid import UUID
 from xml.etree import ElementTree
 
-from bloodhound.lib.soapy import ADWSConnect, NTLMAuth, NAMESPACES
+from bloodhound.lib.soapy import ADWSConnect, NTLMAuth, KerberosAuth, NAMESPACES
 from bloodhound.ad.utils import CollectionException
 from impacket.ldap.ldaptypes import LDAP_SID
 
@@ -94,13 +94,19 @@ class ADWSClient:
         """
         auth = self.ad.auth
 
-        # Create NTLMAuth from BloodHound credentials
-        if auth.nt_hash:
+        # Prefer Kerberos if TGT is available
+        if auth.tgt is not None:
+            adws_auth = KerberosAuth(
+                tgt=auth.tgt,
+                domain=auth.domain,
+                kdc=auth.kdc,
+            )
+        elif auth.nt_hash:
             adws_auth = NTLMAuth(hashes=auth.nt_hash)
         elif auth.password:
             adws_auth = NTLMAuth(password=auth.password)
         else:
-            raise CollectionException("ADWS requires password or NT hash for authentication")
+            raise CollectionException("ADWS requires password, NT hash, or Kerberos TGT for authentication")
 
         try:
             logging.debug('Connecting to ADWS server: %s', self.hostname)

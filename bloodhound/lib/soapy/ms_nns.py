@@ -4,9 +4,10 @@
 The .NET NegotiateStream Protocol provides mutually authenticated
 and confidential communication over a TCP connection.
 
-Modified for BloodHound.py - NTLM authentication only.
+Supports both NTLM and Kerberos authentication.
 """
 
+import datetime
 import logging
 import socket
 
@@ -15,6 +16,15 @@ import impacket.spnego
 import impacket.structure
 from Cryptodome.Cipher import ARC4
 from impacket.hresult_errors import ERROR_MESSAGES
+from impacket.krb5 import constants as krb5_constants
+from impacket.krb5 import gssapi as krb5_gssapi
+from impacket.krb5.asn1 import AP_REQ, Authenticator, TGS_REP, seq_set
+from impacket.krb5.gssapi import CheckSumField
+from impacket.krb5.kerberosv5 import getKerberosTGS
+from impacket.krb5.types import KerberosTime, Principal, Ticket
+from impacket.spnego import SPNEGO_NegTokenInit, TypesMech
+from pyasn1.codec.der import decoder, encoder
+from pyasn1.type.univ import noValue
 
 from .encoder.records.utils import Net7BitInteger
 
@@ -101,6 +111,10 @@ class NNS:
         password: str | None = None,
         nt: str = "",
         lm: str = "",
+        # Kerberos parameters
+        tgt: dict | None = None,
+        domain_for_tgs: str | None = None,
+        kdc: str | None = None,
     ):
         self._sock = socket
 
@@ -116,6 +130,18 @@ class NNS:
         self._session_key: bytes = b""
         self._flags: int = -1
         self._sequence: int = 0
+
+        # Kerberos state
+        self._tgt = tgt
+        self._domain_for_tgs = domain_for_tgs or domain
+        self._kdc = kdc or fqdn
+
+        # Set _kerberos_target so NMF._upgrade() knows to call auth_kerberos()
+        self._kerberos_target = fqdn if tgt is not None else None
+
+        # GSS-API wrapper for Kerberos (None = NTLM mode)
+        self._gss = None
+        self._krb_session_key = None
 
     def _fix_hashes(self, hash: str | bytes) -> bytes | str:
         """fixes up hash if present into bytes and
@@ -176,48 +202,164 @@ class NNS:
 
     def _recv(self, _: int = 0) -> bytes:
         """Receive an NNS packet and return the entire decrypted contents."""
-        nns_data = NNS_data()
         size = int.from_bytes(self._sock.recv(4), "little")
 
         payload = b""
         while len(payload) != size:
             payload += self._sock.recv(size - len(payload))
-        nns_data["payload"] = payload
 
-        # NTLM decryption
-        nns_signed_payload = NNS_Signed_payload()
-        nns_signed_payload["signature"] = nns_data["payload"][0:16]
-        nns_signed_payload["cipherText"] = nns_data["payload"][16:]
+        if self._gss is not None:
+            # Kerberos: GSS-API unwrap
+            clearText, _ = self._gss.GSS_Unwrap_LDAP(
+                self._krb_session_key, payload, self._sequence, direction='init'
+            )
+            return clearText
+        else:
+            # NTLM decryption
+            nns_signed_payload = NNS_Signed_payload()
+            nns_signed_payload["signature"] = payload[0:16]
+            nns_signed_payload["cipherText"] = payload[16:]
 
-        clearText, sig = self.seal(nns_signed_payload["cipherText"])
-        return clearText
+            clearText, sig = self.seal(nns_signed_payload["cipherText"])
+            return clearText
 
     def sendall(self, data: bytes):
         """send to server in sealed NNS data packet via tcp socket."""
-        # NTLM encryption
-        cipherText, sig = impacket.ntlm.SEAL(
-            self._flags,
-            self._client_signing_key,
-            self._client_sealing_key,
-            data,
-            data,
-            self._sequence,
-            self._client_sealing_handle,
-        )
 
-        # build the NNS data packet
-        pkt = NNS_data()
+        if self._gss is not None:
+            # Kerberos: GSS-API wrap
+            cipherText, signature = self._gss.GSS_Wrap_LDAP(
+                self._krb_session_key, data, self._sequence,
+                direction='init', encrypt=True
+            )
 
-        # payload is signature prepended on the ciphertext
-        payload = NNS_Signed_payload()
-        payload["signature"] = sig
-        payload["cipherText"] = cipherText
-        pkt["payload"] = payload.getData()
+            pkt = NNS_data()
+            pkt["payload"] = signature + cipherText
+            self._sock.sendall(pkt.getData())
+        else:
+            # NTLM encryption
+            cipherText, sig = impacket.ntlm.SEAL(
+                self._flags,
+                self._client_signing_key,
+                self._client_sealing_key,
+                data,
+                data,
+                self._sequence,
+                self._client_sealing_handle,
+            )
 
-        self._sock.sendall(pkt.getData())
+            pkt = NNS_data()
+
+            payload = NNS_Signed_payload()
+            payload["signature"] = sig
+            payload["cipherText"] = cipherText
+            pkt["payload"] = payload.getData()
+
+            self._sock.sendall(pkt.getData())
 
         # increment the sequence number after sending
         self._sequence += 1
+
+    def auth_kerberos(self) -> None:
+        """Authenticate to ADWS using Kerberos via impacket.
+
+        Uses the stored TGT to request a TGS for HOST/<fqdn>, builds an
+        AP_REQ manually, wraps it in SPNEGO, and negotiates via NNS handshake.
+        After authentication, sets up GSS-API wrap/unwrap for channel encryption.
+        """
+        logging.info('Authenticating to ADWS via Kerberos')
+
+        # Step 1: Get TGS for HOST/<fqdn>
+        servername = Principal(
+            'HOST/%s' % self._fqdn,
+            type=krb5_constants.PrincipalNameType.NT_SRV_INST.value
+        )
+        tgs, cipher, _, sessionkey = getKerberosTGS(
+            servername, self._domain_for_tgs, self._kdc,
+            self._tgt['KDC_REP'], self._tgt['cipher'], self._tgt['sessionKey']
+        )
+
+        # Step 2: Extract ticket from TGS response
+        tgs_rep = decoder.decode(tgs, asn1Spec=TGS_REP())[0]
+        ticket = Ticket()
+        ticket.from_asn1(tgs_rep['ticket'])
+
+        # Step 3: Build AP_REQ
+        apReq = AP_REQ()
+        apReq['pvno'] = 5
+        apReq['msg-type'] = int(krb5_constants.ApplicationTagNumbers.AP_REQ.value)
+        apReq['ap-options'] = krb5_constants.encodeFlags([])
+        seq_set(apReq, 'ticket', ticket.to_asn1)
+
+        # Step 4: Build Authenticator
+        username = Principal(
+            self._username,
+            type=krb5_constants.PrincipalNameType.NT_PRINCIPAL.value
+        )
+        authenticator = Authenticator()
+        authenticator['authenticator-vno'] = 5
+        authenticator['crealm'] = self._domain_for_tgs
+        seq_set(authenticator, 'cname', username.components_to_asn1)
+        now = datetime.datetime.utcnow()
+        authenticator['cusec'] = now.microsecond
+        authenticator['ctime'] = KerberosTime.to_asn1(now)
+
+        # Step 5: Add GSS checksum (no TLS channel bindings for NNS)
+        authenticator['cksum'] = noValue
+        authenticator['cksum']['cksumtype'] = 0x8003
+        chkField = CheckSumField()
+        chkField['Lgth'] = 16
+        chkField['Flags'] = 0
+        authenticator['cksum']['checksum'] = chkField.getData()
+
+        # Step 6: Encrypt authenticator with TGS session key (key usage 11)
+        encodedAuthenticator = encoder.encode(authenticator)
+        encryptedEncodedAuthenticator = cipher.encrypt(
+            sessionkey, 11, encodedAuthenticator, None
+        )
+
+        apReq['authenticator'] = noValue
+        apReq['authenticator']['etype'] = cipher.enctype
+        apReq['authenticator']['cipher'] = encryptedEncodedAuthenticator
+
+        # Step 7: Wrap AP_REQ in SPNEGO NegTokenInit
+        blob = SPNEGO_NegTokenInit()
+        blob['MechTypes'] = [TypesMech['MS KRB5 - Microsoft Kerberos 5']]
+        blob['MechToken'] = encoder.encode(apReq)
+
+        # Step 8: Send via NNS handshake
+        NNS_handshake(
+            message_id=MessageID.IN_PROGRESS,
+            major_version=1,
+            minor_version=0,
+            payload=blob.getData(),
+        ).send(self._sock)
+
+        # Step 9: Receive server response
+        NNS_msg_resp = NNS_handshake(
+            message_id=int.from_bytes(self._sock.recv(1), "big"),
+            major_version=int.from_bytes(self._sock.recv(1), "big"),
+            minor_version=int.from_bytes(self._sock.recv(1), "big"),
+            payload=self._sock.recv(int.from_bytes(self._sock.recv(2), "big")),
+        )
+
+        # Check for errors
+        if NNS_msg_resp["message_id"] == MessageID.ERROR:
+            err_code = int.from_bytes(NNS_msg_resp["payload"], "big")
+            if err_code in ERROR_MESSAGES:
+                err_type, err_msg = ERROR_MESSAGES[err_code]
+                raise SystemExit(f"[-] Kerberos Auth Failed: {err_type} {err_msg}")
+            raise SystemExit(f"[-] Kerberos Auth Failed with error code: 0x{err_code:08x}")
+
+        if NNS_msg_resp["message_id"] not in (MessageID.DONE, MessageID.IN_PROGRESS):
+            raise SystemExit(f"[-] Kerberos Auth: Unexpected message ID: 0x{NNS_msg_resp['message_id']:02x}")
+
+        logging.debug('Kerberos authentication successful')
+
+        # Step 10: Set up GSS-API wrap/unwrap for channel encryption
+        self._gss = krb5_gssapi.GSSAPI(cipher)
+        self._krb_session_key = sessionkey
+        self._sequence = 0
 
     def auth_ntlm(self) -> None:
         """Authenticate to the dest with NTLMV2 authentication"""
