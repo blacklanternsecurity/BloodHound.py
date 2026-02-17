@@ -9,12 +9,15 @@ Supports both NTLM and Kerberos authentication.
 
 import datetime
 import logging
+import os
 import socket
+import struct
 
 import impacket.ntlm
 import impacket.spnego
 import impacket.structure
 from Cryptodome.Cipher import ARC4
+from Cryptodome.Hash import HMAC, MD5
 from impacket.hresult_errors import ERROR_MESSAGES
 from impacket.krb5 import constants as krb5_constants
 from impacket.krb5 import gssapi as krb5_gssapi
@@ -210,10 +213,13 @@ class NNS:
             payload += self._sock.recv(size - len(payload))
 
         if self._gss is not None:
-            # Kerberos: GSS-API unwrap (server is acceptor → direction='accept')
-            clearText, _ = self._gss.GSS_Unwrap_LDAP(
-                self._krb_session_key, payload, self._recv_sequence, direction='accept'
-            )
+            # Kerberos: unwrap per-message token
+            if self._krb_session_key.enctype == 23:  # RC4-HMAC
+                clearText = self._rc4_unwrap(payload)
+            else:  # AES
+                clearText, _ = self._gss.GSS_Unwrap_LDAP(
+                    self._krb_session_key, payload, self._recv_sequence
+                )
             self._recv_sequence += 1
             return clearText
         else:
@@ -229,14 +235,18 @@ class NNS:
         """send to server in sealed NNS data packet via tcp socket."""
 
         if self._gss is not None:
-            # Kerberos: GSS-API wrap
-            cipherText, signature = self._gss.GSS_Wrap_LDAP(
-                self._krb_session_key, data, self._sequence,
-                direction='init', encrypt=True
-            )
+            # Kerberos: wrap per-message token
+            if self._krb_session_key.enctype == 23:  # RC4-HMAC
+                wrapped = self._rc4_wrap(data, self._sequence)
+            else:  # AES
+                cipherText, signature = self._gss.GSS_Wrap_LDAP(
+                    self._krb_session_key, data, self._sequence,
+                    direction='init', encrypt=True
+                )
+                wrapped = signature + cipherText
 
             pkt = NNS_data()
-            pkt["payload"] = signature + cipherText
+            pkt["payload"] = wrapped
             self._sock.sendall(pkt.getData())
         else:
             # NTLM encryption
@@ -261,6 +271,93 @@ class NNS:
 
         # increment the sequence number after sending
         self._sequence += 1
+
+    def _rc4_wrap(self, data, seq_num):
+        """Wrap data using RFC 4757 RC4-HMAC (bare mechanism token, no MechIndepToken).
+
+        Produces a 32-byte WRAP header followed by RC4-encrypted data.
+        This bypasses impacket's GSS_Wrap_LDAP which has a MechIndepToken
+        wrapping mismatch and a confounder bug in the decrypt path.
+        """
+        key = self._krb_session_key
+
+        # 1-byte padding per RFC 4757
+        data += b'\x01'
+
+        # WRAP header prefix (8 bytes): TOK_ID, SGN_ALG, SEAL_ALG, Filler
+        header_prefix = struct.pack('<HHHH', 0x0102, 0x0011, 0x0010, 0xFFFF)
+
+        # SND_SEQ: seq number (BE) + direction indicator (initiator = 0x00000000)
+        snd_seq_raw = struct.pack('>L', seq_num) + b'\x00\x00\x00\x00'
+
+        # Random 8-byte confounder
+        confounder = os.urandom(8)
+
+        # Signing key
+        Ksign = HMAC.new(key.contents, b'signaturekey\0', MD5).digest()
+
+        # SGN_CKSUM
+        sgn_inner = MD5.new(
+            struct.pack('<L', 13) + header_prefix + confounder + data
+        ).digest()
+        sgn_cksum = HMAC.new(Ksign, sgn_inner, MD5).digest()[:8]
+
+        # Sealing key
+        Klocal = bytes(b ^ 0xF0 for b in key.contents)
+        Kcrypt = HMAC.new(Klocal, struct.pack('<L', 0), MD5).digest()
+        Kcrypt = HMAC.new(Kcrypt, struct.pack('>L', seq_num), MD5).digest()
+
+        # Encrypt confounder + data as one continuous RC4 stream
+        rc4 = ARC4.new(Kcrypt)
+        enc_confounder = rc4.encrypt(confounder)
+        enc_data = rc4.encrypt(data)
+
+        # Encrypt SND_SEQ
+        Kseq = HMAC.new(key.contents, struct.pack('<L', 0), MD5).digest()
+        Kseq = HMAC.new(Kseq, sgn_cksum, MD5).digest()
+        enc_snd_seq = ARC4.new(Kseq).encrypt(snd_seq_raw)
+
+        # Complete bare token: header(8) + SND_SEQ(8) + SGN_CKSUM(8) + Confounder(8) + data
+        return header_prefix + enc_snd_seq + sgn_cksum + enc_confounder + enc_data
+
+    def _rc4_unwrap(self, payload):
+        """Unwrap RFC 4757 RC4-HMAC wrapped data (handles both bare and MechIndepToken).
+
+        The key derivation is self-contained: the decryption key is derived
+        from the token's embedded SGN_CKSUM and SND_SEQ, not from external
+        sequence numbers or direction parameters.
+        """
+        key = self._krb_session_key
+
+        # Strip MechIndepToken wrapper if present (Windows may use it for RC4)
+        if payload[0:1] == b'\x60':
+            from impacket.krb5.gssapi import MechIndepToken
+            mit = MechIndepToken.from_bytes(payload)
+            payload = mit.data
+
+        # Parse 32-byte WRAP header:
+        # header_prefix(8) + SND_SEQ(8) + SGN_CKSUM(8) + Confounder(8)
+        enc_snd_seq = payload[8:16]
+        sgn_cksum = payload[16:24]
+        enc_confounder = payload[24:32]
+        enc_data = payload[32:]
+
+        # Derive sequence key and decrypt SND_SEQ
+        Kseq = HMAC.new(key.contents, struct.pack('<L', 0), MD5).digest()
+        Kseq = HMAC.new(Kseq, sgn_cksum, MD5).digest()
+        snd_seq = ARC4.new(Kseq).encrypt(enc_snd_seq)  # RC4 encrypt == decrypt
+
+        # Derive decryption key from sender's sequence number
+        Klocal = bytes(b ^ 0xF0 for b in key.contents)
+        Kcrypt = HMAC.new(Klocal, struct.pack('<L', 0), MD5).digest()
+        Kcrypt = HMAC.new(Kcrypt, snd_seq[:4], MD5).digest()
+
+        # Decrypt confounder + data as one continuous RC4 stream
+        rc4 = ARC4.new(Kcrypt)
+        plaintext = rc4.decrypt(enc_confounder + enc_data)
+
+        # Skip 8-byte confounder, remove 1-byte padding
+        return plaintext[8:-1]
 
     def auth_kerberos(self) -> None:
         """Authenticate to ADWS using Kerberos via impacket.
