@@ -390,7 +390,6 @@ class NNS:
         # The server's response contains a SPNEGO NegTokenResp wrapping an AP_REP.
         # The AP_REP may contain a subkey that MUST be used for subsequent encryption.
         enc_key = sessionkey
-        enc_cipher = cipher
         if server_payload and len(server_payload) > 0:
             try:
                 spnego_resp = SPNEGO_NegTokenResp(server_payload)
@@ -417,17 +416,6 @@ class NNS:
                         subkey_type = int(enc_ap_rep['subkey']['keytype'])
                         subkey_value = bytes(enc_ap_rep['subkey']['keyvalue'])
                         enc_key = KerberosKey(subkey_type, subkey_value)
-                        # Look up cipher class for the subkey etype
-                        if subkey_type == cipher.enctype:
-                            enc_cipher = cipher
-                        else:
-                            # Different etype than TGS - look up from crypto module
-                            from impacket.krb5 import crypto as _krb_crypto
-                            _etype_map = getattr(_krb_crypto, '_enctypes', None) or getattr(_krb_crypto, '_enctype_table', None)
-                            if _etype_map and subkey_type in _etype_map:
-                                enc_cipher = _etype_map[subkey_type]
-                            else:
-                                logging.warning('Unknown subkey etype %d, using TGS cipher', subkey_type)
                         logging.debug('Using subkey from AP_REP (etype %d, %d bytes)',
                                      subkey_type, len(subkey_value))
                     else:
@@ -436,7 +424,11 @@ class NNS:
                 logging.debug('Could not process AP_REP for subkey: %s', e)
 
         # Step 11: Set up GSS-API wrap/unwrap for channel encryption
-        self._gss = krb5_gssapi.GSSAPI(enc_cipher)
+        # GSSAPI() factory only checks .enctype on the passed object to select the
+        # right wrapper (RC4/AES128/AES256). KerberosKey has .enctype, so passing
+        # enc_key directly picks the correct GSSAPI class even when the subkey
+        # etype differs from the TGS session key etype.
+        self._gss = krb5_gssapi.GSSAPI(enc_key)
         self._krb_session_key = enc_key
         self._sequence = 0
 
