@@ -8,13 +8,13 @@ for interaction with ADWS (port 9389):
 - MC-NBFSE: .NET Binary Format SOAP Extension
 
 Based on SoaPy by IBM X-Force Red.
-Modified for BloodHound.py - NTLM authentication only.
+Modified for BloodHound.py - NTLM and Kerberos authentication.
 """
 
 from .ms_nmf import NMFConnection
 from .ms_nns import NNS
 from .encoder import Encoder
-from .adws import ADWSConnect, NTLMAuth, ADWSAuthType
+from .adws import ADWSConnect, NTLMAuth, KerberosAuth, ADWSAuthType
 from .soap_templates import NAMESPACES
 
 __all__ = [
@@ -23,6 +23,7 @@ __all__ = [
     "Encoder",
     "ADWSConnect",
     "NTLMAuth",
+    "KerberosAuth",
     "ADWSAuthType",
     "NAMESPACES",
 ]

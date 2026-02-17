@@ -1,12 +1,23 @@
 import base64
 import datetime
+import re
 import struct
 from html.entities import codepoint2name
 from typing import Self
+from xml.sax.saxutils import escape as _xml_escape
 
 from .constants import DICTIONARY
 from .datatypes import Decimal, MultiByteInt31
 from .record import record
+
+# Characters that are invalid in XML 1.0 (control chars except \t, \n, \r)
+_XML_INVALID_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
+
+def _escape_xml_text(text: str) -> str:
+    """Escape a string for safe inclusion as XML text content."""
+    text = _XML_INVALID_CHARS_RE.sub('', text)
+    return _xml_escape(text)
 
 
 class Text(record): ...
@@ -150,7 +161,7 @@ class UnicodeChars8TextRecord(Text):
         return bytes
 
     def __str__(self):
-        return self.value
+        return _escape_xml_text(self.value)
 
     @classmethod
     def parse(cls, fp) -> Self:
@@ -170,7 +181,7 @@ class UnicodeChars16TextRecord(UnicodeChars8TextRecord):
         return bytes
 
     def __str__(self):
-        return self.value
+        return _escape_xml_text(self.value)
 
     @classmethod
     def parse(cls, fp) -> Self:
@@ -190,7 +201,7 @@ class UnicodeChars32TextRecord(UnicodeChars8TextRecord):
         return bytes
 
     def __str__(self):
-        return self.value
+        return _escape_xml_text(self.value)
 
     @classmethod
     def parse(cls, fp) -> Self:
@@ -332,11 +343,7 @@ class Chars8TextRecord(Text):
         self.value = value
 
     def __str__(self):
-        # TODO:  check if having unexcaped value is a problem?
-        # removed the return excape(self.value) because str() was used
-        # in the print_records function, so it printed stuff like
-        # amp(value) and stuff.
-        return self.value
+        return _escape_xml_text(self.value)
 
     def to_bytes(self) -> bytes:
         data = self.value.encode("utf-8")
@@ -360,7 +367,7 @@ class Chars16TextRecord(Text):
         self.value = value
 
     def __str__(self):
-        return self.value
+        return _escape_xml_text(self.value)
 
     def to_bytes(self) -> bytes:
         data = self.value.encode("utf-8")
@@ -384,7 +391,7 @@ class Chars32TextRecord(Text):
         self.value = value
 
     def __str__(self):
-        return self.value
+        return _escape_xml_text(self.value)
 
     def to_bytes(self) -> bytes:
         data = self.value.encode("utf-8")

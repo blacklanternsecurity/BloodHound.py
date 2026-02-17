@@ -1,5 +1,3 @@
-import logging as log
-
 from .record import Element, EndElementRecord, record
 from .text import Text
 
@@ -67,37 +65,21 @@ def dump_records(records: list[record]) -> bytes:
     out = b""
 
     for r in records:
-        msg = f"Write {type(r).__name__}"
-
         if r == records[-1] and isinstance(r, Text):
             r.type = r.type + 1
-            msg += " with EndElement (0x%X)" % r.type
-        log.debug(msg)
-        log.debug(f"Value {r}")
-
-        if (
-            isinstance(r, Element)
-            and not isinstance(r, EndElementRecord)
-            and len(r.attributes)
-        ):
-            log.debug(" Attributes:")
-            for a in r.attributes:
-                log.debug(f" {type(a).__name__}: {a}")
 
         out += r.to_bytes()
 
         if hasattr(r, "childs"):
             out += dump_records(r.childs)
 
-            # only print the end element if the current record is NOT a "*WithEnd" record type
+            # only write the end element if the current record is NOT a "*WithEnd" record type
             if (not r.childs or not isinstance(r.childs[-1], Text)) and not isinstance(
                 r, Text
             ):
-                log.debug(f"Write EndElement for {type(r).__name__}")
                 out += EndElementRecord().to_bytes()
 
         elif isinstance(r, Element) and not isinstance(r, EndElementRecord):
-            log.debug(f"Write EndElement for {type(r).__name__}")
             out += EndElementRecord().to_bytes()
 
     return out
