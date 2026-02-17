@@ -1,7 +1,7 @@
 """
 ADWS (Active Directory Web Services) client implementation.
 
-Modified for BloodHound.py - NTLM authentication only.
+Modified for BloodHound.py - NTLM and Kerberos authentication.
 """
 
 import datetime
@@ -232,14 +232,29 @@ class NTLMAuth(ADWSAuthType):
         self.password = password
 
 
+class KerberosAuth(ADWSAuthType):
+    def __init__(self, tgt: dict, domain: str, kdc: str):
+        """Kerberos authentication using an existing TGT.
+
+        Args:
+            tgt: Dict with 'KDC_REP', 'cipher', 'sessionKey' from impacket's getKerberosTGT
+            domain: Domain for TGS requests
+            kdc: KDC hostname/IP for TGS requests
+        """
+        self.tgt = tgt
+        self.domain = domain
+        self.kdc = kdc
+
+
 class ADWSConnect:
     def __init__(
         self,
         fqdn: str,
         domain: str,
         username: str,
-        auth: NTLMAuth,
+        auth: NTLMAuth | KerberosAuth,
         resource: str,
+        target_ip: str | None = None,
     ):
         """Creates an ADWS client connection to the specified endpoint.
 
@@ -247,10 +262,12 @@ class ADWSConnect:
             fqdn: fqdn of the domain controller the ADWS service is running on
             domain: the domain
             username: user to auth as
-            auth: auth mechanism to use (NTLMAuth)
+            auth: auth mechanism to use (NTLMAuth or KerberosAuth)
             resource: the resource dictates what endpoint the client connects to
+            target_ip: resolved IP address for TCP connection (uses fqdn if not set)
         """
         self._fqdn = fqdn
+        self._target_ip = target_ip or fqdn
         self._domain = domain
         self._username = username
         self._auth = auth
@@ -260,7 +277,17 @@ class ADWSConnect:
         self._nmf: ms_nmf.NMFConnection = self._connect(self._fqdn, self._resource)
 
     def _create_NNS_from_auth(self, sock: socket.socket) -> NNS:
-        if isinstance(self._auth, NTLMAuth):
+        if isinstance(self._auth, KerberosAuth):
+            return NNS(
+                socket=sock,
+                fqdn=self._fqdn,
+                domain=self._domain,
+                username=self._username,
+                tgt=self._auth.tgt,
+                domain_for_tgs=self._auth.domain,
+                kdc=self._auth.kdc,
+            )
+        elif isinstance(self._auth, NTLMAuth):
             return NNS(
                 socket=sock,
                 fqdn=self._fqdn,
@@ -273,8 +300,9 @@ class ADWSConnect:
 
     def _connect(self, remoteName: str, resource: str) -> ms_nmf.NMFConnection:
         """Connect to the specified ADWS endpoint."""
-        server_address: tuple[str, int] = (remoteName, 9389)
-        logging.debug(f"Connecting to ADWS at {remoteName}:9389 for {self._resource}")
+        connect_host = self._target_ip
+        server_address: tuple[str, int] = (connect_host, 9389)
+        logging.debug(f"Connecting to ADWS at {connect_host}:9389 for {self._resource}")
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(server_address)
@@ -469,9 +497,9 @@ class ADWSConnect:
         return results
 
     @classmethod
-    def pull_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth) -> Self:
-        return cls(ip, domain, username, auth, "Enumeration")
+    def pull_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth, target_ip: str | None = None) -> Self:
+        return cls(ip, domain, username, auth, "Enumeration", target_ip=target_ip)
 
     @classmethod
-    def put_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth) -> Self:
-        return cls(ip, domain, username, auth, "Resource")
+    def put_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth, target_ip: str | None = None) -> Self:
+        return cls(ip, domain, username, auth, "Resource", target_ip=target_ip)

@@ -78,11 +78,8 @@ class ADDC(ADComputer):
         except:
             pass
 
-        if not ip:
-            # Try using hostname directly
-            ip = self.hostname
-
-        self._adws_client = ADWSClient(ip, self.ad)
+        # Pass FQDN as hostname (needed for Kerberos SPN), resolved IP for TCP
+        self._adws_client = ADWSClient(self.hostname, self.ad, target_ip=ip)
         self._adws_client.connect()
         if first_connect:
             logging.info('Successfully connected to ADWS')

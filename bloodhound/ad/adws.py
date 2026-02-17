@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Generator
 from uuid import UUID
 from xml.etree import ElementTree
 
-from bloodhound.lib.soapy import ADWSConnect, NTLMAuth, NAMESPACES
+from bloodhound.lib.soapy import ADWSConnect, NTLMAuth, KerberosAuth, NAMESPACES
 from bloodhound.ad.utils import CollectionException
 from impacket.ldap.ldaptypes import LDAP_SID
 
@@ -72,15 +72,17 @@ class ADWSClient:
         "badPwdCount",
     }
 
-    def __init__(self, hostname: str, ad: "AD"):
+    def __init__(self, hostname: str, ad: "AD", target_ip: str | None = None):
         """
         Initialize ADWS client.
 
         Args:
-            hostname: DC hostname or IP to connect to
+            hostname: DC FQDN for SPN construction and NMF via
             ad: BloodHound AD object containing auth and domain info
+            target_ip: Resolved IP for TCP connection (uses hostname if not set)
         """
         self.hostname = hostname
+        self.target_ip = target_ip
         self.ad = ad
         self._client: Optional[ADWSConnect] = None
         self._schema_classes: Optional[set] = None
@@ -94,13 +96,19 @@ class ADWSClient:
         """
         auth = self.ad.auth
 
-        # Create NTLMAuth from BloodHound credentials
-        if auth.nt_hash:
+        # Prefer Kerberos if TGT is available
+        if auth.tgt is not None:
+            adws_auth = KerberosAuth(
+                tgt=auth.tgt,
+                domain=auth.domain,
+                kdc=auth.kdc,
+            )
+        elif auth.nt_hash:
             adws_auth = NTLMAuth(hashes=auth.nt_hash)
         elif auth.password:
             adws_auth = NTLMAuth(password=auth.password)
         else:
-            raise CollectionException("ADWS requires password or NT hash for authentication")
+            raise CollectionException("ADWS requires password, NT hash, or Kerberos TGT for authentication")
 
         try:
             logging.debug('Connecting to ADWS server: %s', self.hostname)
@@ -109,6 +117,7 @@ class ADWSClient:
                 domain=self.ad.domain,
                 username=auth.username,
                 auth=adws_auth,
+                target_ip=self.target_ip,
             )
             logging.debug('Successfully connected to ADWS')
         except Exception as e:
