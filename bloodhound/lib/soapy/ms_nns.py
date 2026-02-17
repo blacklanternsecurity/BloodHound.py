@@ -317,8 +317,14 @@ class NNS:
         Kseq = HMAC.new(Kseq, sgn_cksum, MD5).digest()
         enc_snd_seq = ARC4.new(Kseq).encrypt(snd_seq_raw)
 
-        # Complete bare token: header(8) + SND_SEQ(8) + SGN_CKSUM(8) + Confounder(8) + data
-        return header_prefix + enc_snd_seq + sgn_cksum + enc_confounder + enc_data
+        # Build bare mechanism token: header(8) + SND_SEQ(8) + SGN_CKSUM(8) + Confounder(8) + data
+        bare_token = header_prefix + enc_snd_seq + sgn_cksum + enc_confounder + enc_data
+
+        # Windows NNS expects RC4 per-message tokens wrapped in MechIndepToken
+        from impacket.krb5.gssapi import MechIndepToken, KRB_OID
+        mit = MechIndepToken(bare_token, KRB_OID)
+        mit_header, mit_data = mit.to_bytes()
+        return mit_header + mit_data
 
     def _rc4_unwrap(self, payload):
         """Unwrap RFC 4757 RC4-HMAC wrapped data (handles both bare and MechIndepToken).
