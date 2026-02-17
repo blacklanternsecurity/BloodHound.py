@@ -19,7 +19,7 @@ from impacket.hresult_errors import ERROR_MESSAGES
 from impacket.krb5 import constants as krb5_constants
 from impacket.krb5 import gssapi as krb5_gssapi
 from impacket.krb5.asn1 import AP_REP, AP_REQ, Authenticator, EncAPRepPart, TGS_REP, seq_set
-from impacket.krb5.crypto import _enctypes as krb5_enctypes, Key as KerberosKey
+from impacket.krb5.crypto import Key as KerberosKey
 from impacket.krb5.gssapi import CheckSumField, GSS_C_MUTUAL_FLAG, GSS_C_REPLAY_FLAG, GSS_C_SEQUENCE_FLAG
 from impacket.krb5.kerberosv5 import getKerberosTGS
 from impacket.krb5.types import KerberosTime, Principal, Ticket
@@ -406,9 +406,19 @@ class NNS:
                     if enc_ap_rep['subkey'] and enc_ap_rep['subkey'].hasValue():
                         subkey_type = int(enc_ap_rep['subkey']['keytype'])
                         subkey_value = bytes(enc_ap_rep['subkey']['keyvalue'])
-                        enc_cipher = krb5_enctypes[subkey_type]
                         enc_key = KerberosKey(subkey_type, subkey_value)
-                        logging.debug('Using subkey from AP_REP (type %d, %d bytes)',
+                        # Look up cipher class for the subkey etype
+                        if subkey_type == cipher.enctype:
+                            enc_cipher = cipher
+                        else:
+                            # Different etype than TGS - look up from crypto module
+                            from impacket.krb5 import crypto as _krb_crypto
+                            _etype_map = getattr(_krb_crypto, '_enctypes', None) or getattr(_krb_crypto, '_enctype_table', None)
+                            if _etype_map and subkey_type in _etype_map:
+                                enc_cipher = _etype_map[subkey_type]
+                            else:
+                                logging.warning('Unknown subkey etype %d, using TGS cipher', subkey_type)
+                        logging.debug('Using subkey from AP_REP (etype %d, %d bytes)',
                                      subkey_type, len(subkey_value))
                     else:
                         logging.debug('No subkey in AP_REP, using TGS session key')
