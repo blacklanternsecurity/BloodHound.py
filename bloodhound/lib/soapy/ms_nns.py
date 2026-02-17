@@ -210,10 +210,11 @@ class NNS:
             payload += self._sock.recv(size - len(payload))
 
         if self._gss is not None:
-            # Kerberos: GSS-API unwrap
+            # Kerberos: GSS-API unwrap (server is acceptor → direction='accept')
             clearText, _ = self._gss.GSS_Unwrap_LDAP(
-                self._krb_session_key, payload, self._sequence, direction='init'
+                self._krb_session_key, payload, self._recv_sequence, direction='accept'
             )
+            self._recv_sequence += 1
             return clearText
         else:
             # NTLM decryption
@@ -430,7 +431,8 @@ class NNS:
         # etype differs from the TGS session key etype.
         self._gss = krb5_gssapi.GSSAPI(enc_key)
         self._krb_session_key = enc_key
-        self._sequence = 0
+        self._sequence = 0          # client send sequence counter
+        self._recv_sequence = 0     # server recv sequence counter
 
     def auth_ntlm(self) -> None:
         """Authenticate to the dest with NTLMV2 authentication"""
