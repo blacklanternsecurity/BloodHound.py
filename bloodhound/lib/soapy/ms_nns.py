@@ -19,7 +19,7 @@ from impacket.hresult_errors import ERROR_MESSAGES
 from impacket.krb5 import constants as krb5_constants
 from impacket.krb5 import gssapi as krb5_gssapi
 from impacket.krb5.asn1 import AP_REQ, Authenticator, TGS_REP, seq_set
-from impacket.krb5.gssapi import CheckSumField
+from impacket.krb5.gssapi import CheckSumField, GSS_C_MUTUAL_FLAG, GSS_C_REPLAY_FLAG, GSS_C_SEQUENCE_FLAG
 from impacket.krb5.kerberosv5 import getKerberosTGS
 from impacket.krb5.types import KerberosTime, Principal, Ticket
 from impacket.spnego import SPNEGO_NegTokenInit, TypesMech
@@ -284,11 +284,11 @@ class NNS:
         ticket = Ticket()
         ticket.from_asn1(tgs_rep['ticket'])
 
-        # Step 3: Build AP_REQ
+        # Step 3: Build AP_REQ with mutual authentication required
         apReq = AP_REQ()
         apReq['pvno'] = 5
         apReq['msg-type'] = int(krb5_constants.ApplicationTagNumbers.AP_REQ.value)
-        apReq['ap-options'] = krb5_constants.encodeFlags([])
+        apReq['ap-options'] = krb5_constants.encodeFlags([krb5_constants.APOptions.mutual_required.value])
         seq_set(apReq, 'ticket', ticket.to_asn1)
 
         # Step 4: Build Authenticator
@@ -304,12 +304,18 @@ class NNS:
         authenticator['cusec'] = now.microsecond
         authenticator['ctime'] = KerberosTime.to_asn1(now)
 
-        # Step 5: Add GSS checksum (no TLS channel bindings for NNS)
+        # Step 5: Add GSS checksum with required security flags
+        # NNS requires mutual auth, confidentiality, integrity, replay & sequence detection
+        GSS_C_CONF_FLAG = 16
+        GSS_C_INTEG_FLAG = 32
+        gss_flags = (GSS_C_MUTUAL_FLAG | GSS_C_REPLAY_FLAG | GSS_C_SEQUENCE_FLAG |
+                     GSS_C_CONF_FLAG | GSS_C_INTEG_FLAG)
+
         authenticator['cksum'] = noValue
         authenticator['cksum']['cksumtype'] = 0x8003
         chkField = CheckSumField()
         chkField['Lgth'] = 16
-        chkField['Flags'] = 0
+        chkField['Flags'] = gss_flags
         authenticator['cksum']['checksum'] = chkField.getData()
 
         # Step 6: Encrypt authenticator with TGS session key (key usage 11)
@@ -335,7 +341,7 @@ class NNS:
             payload=blob.getData(),
         ).send(self._sock)
 
-        # Step 9: Receive server response
+        # Step 9: Receive server response (mutual auth handshake)
         NNS_msg_resp = NNS_handshake(
             message_id=int.from_bytes(self._sock.recv(1), "big"),
             major_version=int.from_bytes(self._sock.recv(1), "big"),
@@ -351,7 +357,29 @@ class NNS:
                 raise SystemExit(f"[-] Kerberos Auth Failed: {err_type} {err_msg}")
             raise SystemExit(f"[-] Kerberos Auth Failed with error code: 0x{err_code:08x}")
 
-        if NNS_msg_resp["message_id"] not in (MessageID.DONE, MessageID.IN_PROGRESS):
+        # Handle mutual auth: server sends DONE or IN_PROGRESS with AP_REP
+        if NNS_msg_resp["message_id"] == MessageID.IN_PROGRESS:
+            # Server needs another round - send empty DONE to complete
+            logging.debug('Processing mutual auth response from server')
+            NNS_handshake(
+                message_id=MessageID.DONE,
+                major_version=1,
+                minor_version=0,
+                payload=b'',
+            ).send(self._sock)
+
+            # Receive final DONE
+            NNS_msg_final = NNS_handshake(
+                message_id=int.from_bytes(self._sock.recv(1), "big"),
+                major_version=int.from_bytes(self._sock.recv(1), "big"),
+                minor_version=int.from_bytes(self._sock.recv(1), "big"),
+                payload=self._sock.recv(int.from_bytes(self._sock.recv(2), "big")),
+            )
+            if NNS_msg_final["message_id"] == MessageID.ERROR:
+                err_code = int.from_bytes(NNS_msg_final["payload"], "big")
+                raise SystemExit(f"[-] Kerberos Auth Failed at final step with error code: 0x{err_code:08x}")
+
+        elif NNS_msg_resp["message_id"] != MessageID.DONE:
             raise SystemExit(f"[-] Kerberos Auth: Unexpected message ID: 0x{NNS_msg_resp['message_id']:02x}")
 
         logging.debug('Kerberos authentication successful')
