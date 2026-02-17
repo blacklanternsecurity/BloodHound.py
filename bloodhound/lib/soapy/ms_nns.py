@@ -18,11 +18,12 @@ from Cryptodome.Cipher import ARC4
 from impacket.hresult_errors import ERROR_MESSAGES
 from impacket.krb5 import constants as krb5_constants
 from impacket.krb5 import gssapi as krb5_gssapi
-from impacket.krb5.asn1 import AP_REQ, Authenticator, TGS_REP, seq_set
+from impacket.krb5.asn1 import AP_REP, AP_REQ, Authenticator, EncAPRepPart, TGS_REP, seq_set
+from impacket.krb5.crypto import _enctypes as krb5_enctypes, Key as KerberosKey
 from impacket.krb5.gssapi import CheckSumField, GSS_C_MUTUAL_FLAG, GSS_C_REPLAY_FLAG, GSS_C_SEQUENCE_FLAG
 from impacket.krb5.kerberosv5 import getKerberosTGS
 from impacket.krb5.types import KerberosTime, Principal, Ticket
-from impacket.spnego import SPNEGO_NegTokenInit, TypesMech
+from impacket.spnego import SPNEGO_NegTokenInit, SPNEGO_NegTokenResp, TypesMech
 from pyasn1.codec.der import decoder, encoder
 from pyasn1.type.univ import noValue
 
@@ -358,6 +359,7 @@ class NNS:
             raise SystemExit(f"[-] Kerberos Auth Failed with error code: 0x{err_code:08x}")
 
         # Handle mutual auth: server sends DONE or IN_PROGRESS with AP_REP
+        server_payload = NNS_msg_resp["payload"]
         if NNS_msg_resp["message_id"] == MessageID.IN_PROGRESS:
             # Server needs another round - send empty DONE to complete
             logging.debug('Processing mutual auth response from server')
@@ -384,9 +386,38 @@ class NNS:
 
         logging.debug('Kerberos authentication successful')
 
-        # Step 10: Set up GSS-API wrap/unwrap for channel encryption
-        self._gss = krb5_gssapi.GSSAPI(cipher)
-        self._krb_session_key = sessionkey
+        # Step 10: Process AP_REP to extract subkey (if present)
+        # The server's response contains a SPNEGO NegTokenResp wrapping an AP_REP.
+        # The AP_REP may contain a subkey that MUST be used for subsequent encryption.
+        enc_key = sessionkey
+        enc_cipher = cipher
+        if server_payload and len(server_payload) > 0:
+            try:
+                spnego_resp = SPNEGO_NegTokenResp(server_payload)
+                ap_rep_data = spnego_resp['ResponseToken']
+                if ap_rep_data and len(ap_rep_data) > 0:
+                    ap_rep = decoder.decode(bytes(ap_rep_data), asn1Spec=AP_REP())[0]
+                    enc_part = ap_rep['enc-part']
+                    # Decrypt AP_REP enc-part with TGS session key (key usage 12)
+                    dec_part = cipher.decrypt(sessionkey, 12, bytes(enc_part['cipher']))
+                    enc_ap_rep = decoder.decode(dec_part, asn1Spec=EncAPRepPart())[0]
+
+                    # Extract subkey if server provided one
+                    if enc_ap_rep['subkey'] and enc_ap_rep['subkey'].hasValue():
+                        subkey_type = int(enc_ap_rep['subkey']['keytype'])
+                        subkey_value = bytes(enc_ap_rep['subkey']['keyvalue'])
+                        enc_cipher = krb5_enctypes[subkey_type]
+                        enc_key = KerberosKey(subkey_type, subkey_value)
+                        logging.debug('Using subkey from AP_REP (type %d, %d bytes)',
+                                     subkey_type, len(subkey_value))
+                    else:
+                        logging.debug('No subkey in AP_REP, using TGS session key')
+            except Exception as e:
+                logging.debug('Could not process AP_REP for subkey: %s', e)
+
+        # Step 11: Set up GSS-API wrap/unwrap for channel encryption
+        self._gss = krb5_gssapi.GSSAPI(enc_cipher)
+        self._krb_session_key = enc_key
         self._sequence = 0
 
     def auth_ntlm(self) -> None:
