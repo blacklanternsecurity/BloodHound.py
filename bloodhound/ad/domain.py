@@ -990,6 +990,9 @@ class AD(object):
         try:
             linkentry = self.dncache[distinguishedname.upper()]
         except KeyError:
+            if self.use_adws:
+                logging.debug('DN not in cache, skipping LDAP resolution in ADWS mode: %s', distinguishedname)
+                return None
             use_gc = ADUtils.ldap2domain(distinguishedname).lower() != self.domain.lower()
             qobject = self.objectresolver.resolve_distinguishedname(distinguishedname, use_gc=use_gc)
             if qobject is None:
