@@ -7,6 +7,7 @@ enumeration code.
 """
 
 import logging
+import threading
 from base64 import b64decode
 from typing import Any, Dict, List, Optional, Generator
 from uuid import UUID
@@ -86,6 +87,11 @@ class ADWSClient:
         self.ad = ad
         self._client: Optional[ADWSConnect] = None
         self._schema_classes: Optional[set] = None
+        # Serializes SOAP request/response cycles on the single shared TCP/NMF
+        # stream. Without this, the main enumeration thread and the ACL
+        # callback thread (from the multiprocessing pool's result callback)
+        # can interleave requests, corrupting frames and causing server RST.
+        self._io_lock = threading.Lock()
 
     def connect(self) -> None:
         """
@@ -153,11 +159,12 @@ class ADWSClient:
         self._schema_classes = set()
 
         try:
-            results = self._client.pull(
-                query="(objectClass=classSchema)",
-                attributes=["lDAPDisplayName"],
-                search_base=self.schema_naming_context,
-            )
+            with self._io_lock:
+                results = self._client.pull(
+                    query="(objectClass=classSchema)",
+                    attributes=["lDAPDisplayName"],
+                    search_base=self.schema_naming_context,
+                )
 
             for entry in self._parse_xml_entries(results):
                 name = entry['attributes'].get('lDAPDisplayName')
@@ -224,13 +231,18 @@ class ADWSClient:
         adws_scope = self._SCOPE_MAP.get(str(search_scope).upper(), 'Subtree')
 
         try:
-            results_xml = self._client.pull(
-                query=search_filter,
-                attributes=attr_list,
-                search_base=search_base,
-                scope=adws_scope,
-                query_sd=query_sd,
-            )
+            # Hold the lock only for the SOAP request/response. pull() completes
+            # its enumerate/pull loop before returning, so the lock does not span
+            # generator yields, which keeps consumers free to recurse back into
+            # search() without deadlocking.
+            with self._io_lock:
+                results_xml = self._client.pull(
+                    query=search_filter,
+                    attributes=attr_list,
+                    search_base=search_base,
+                    scope=adws_scope,
+                    query_sd=query_sd,
+                )
 
             for entry in self._parse_xml_entries(results_xml):
                 yield entry
@@ -263,12 +275,14 @@ class ADWSClient:
             attr_list = list(attributes)
 
         try:
-            # Use the DN as the search base with a simple filter
-            results_xml = self._client.pull(
-                query="(objectClass=*)",
-                attributes=attr_list,
-                search_base=dn,
-            )
+            # Use the DN as the search base with a simple filter.
+            # See search() for the rationale on the I/O lock.
+            with self._io_lock:
+                results_xml = self._client.pull(
+                    query="(objectClass=*)",
+                    attributes=attr_list,
+                    search_base=dn,
+                )
 
             entries = list(self._parse_xml_entries(results_xml))
             if entries:
