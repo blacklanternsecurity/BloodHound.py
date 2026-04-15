@@ -240,11 +240,19 @@ class ADDC(ADComputer):
             if not search_base:  # Handle None and empty string
                 search_base = self.ad.baseDN
 
-            # Convert attributes to list if needed
-            # ADWS requires explicit attribute lists - it doesn't handle empty lists well
+            # ADWS has no ALL_ATTRIBUTES equivalent. When a caller passes an
+            # empty list (relying on LDAP's ALL_ATTRIBUTES behavior), substitute
+            # a broad default covering the common fields enumeration code
+            # reads. Don't shrink it to the bare identity trio or attributes
+            # like gPLink on the domain object get silently dropped.
             if attributes is None or attributes == []:
-                # Provide minimal default attributes for ADWS
-                attr_list = ['distinguishedName', 'objectSid', 'objectClass']
+                attr_list = [
+                    'distinguishedName', 'objectSid', 'objectClass', 'objectGUID',
+                    'sAMAccountName', 'sAMAccountType', 'name', 'description',
+                    'whenCreated', 'whenChanged', 'displayName',
+                    'gPLink', 'gPOptions', 'nETBIOSName', 'nCName',
+                    'msDS-Behavior-Version', 'ms-DS-MachineAccountQuota',
+                ]
             elif isinstance(attributes, str):
                 attr_list = [attributes]
             else:
@@ -462,16 +470,9 @@ class ADDC(ADComputer):
     def get_domains(self, acl=False):
         """
         Function to get domains. This should only return the current domain.
-
-        Attributes are listed explicitly so the ADWS path (which substitutes
-        minimal defaults for an empty list) still returns gPLink/gPOptions and
-        the other fields domains.py expects.
         """
-        properties = ['distinguishedName', 'objectSid', 'objectClass', 'objectGUID',
-                      'name', 'gPLink', 'gPOptions', 'msDS-Behavior-Version',
-                      'ms-DS-MachineAccountQuota', 'whencreated']
         entries = self.search('(objectClass=domain)',
-                              properties,
+                              [],
                               generator=True,
                               query_sd=acl)
 
