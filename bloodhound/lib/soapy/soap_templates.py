@@ -38,7 +38,7 @@ LDAP_QUERY_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap
                 <adlq:LdapQuery>
                     <adlq:Filter>{query}</adlq:Filter>
                     <adlq:BaseObject>{baseobj}</adlq:BaseObject>
-                    <adlq:Scope>Subtree</adlq:Scope>
+                    <adlq:Scope>{scope}</adlq:Scope>
                 </adlq:LdapQuery>
             </wsen:Filter>
             <ad:Selection Dialect="http://schemas.microsoft.com/2008/1/ActiveDirectory/Dialect/XPath-Level-1">
@@ -67,9 +67,24 @@ LDAP_PULL_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-
         <wsen:Pull>
             <wsen:EnumerationContext>{enum_ctx}</wsen:EnumerationContext>
             <wsen:MaxElements>256</wsen:MaxElements>
+            {controls}
         </wsen:Pull>
     </s:Body>
 </s:Envelope>"""
+
+
+# SD_FLAGS control (LDAP_SERVER_SD_FLAGS_OID, OID 1.2.840.113556.1.4.801).
+# Used to request nTSecurityDescriptor without requiring SeSecurityPrivilege
+# on the server. The controlValue is a BER-encoded SEQUENCE { INTEGER flags }.
+# Flags: 0x01=Owner, 0x02=Group, 0x04=DACL, 0x08=SACL.
+# 0x05 (Owner+DACL) matches the ldap3 path's security_descriptor_control(sdflags=0x05).
+SD_FLAGS_CONTROL_XML = (
+    '<ad:controls>'
+    '<ad:control type="1.2.840.113556.1.4.801" criticality="true">'
+    '<ad:controlValue xsi:type="xsd:base64Binary">MIQAAAADAgEF</ad:controlValue>'
+    '</ad:control>'
+    '</ad:controls>'
+)
 
 
 LDAP_PUT_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"

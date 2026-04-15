@@ -174,12 +174,21 @@ class ADWSClient:
                 'msDS-GroupManagedServiceAccount', 'msDS-ManagedServiceAccount'
             }
 
+    # Map from ldap3 search scope constants to ADWS LdapQuery dialect scope strings.
+    # ldap3 exposes these as strings: 'BASE', 'LEVEL', 'SUBTREE'.
+    _SCOPE_MAP = {
+        'BASE': 'Base',
+        'LEVEL': 'OneLevel',
+        'SUBTREE': 'Subtree',
+    }
+
     def search(
         self,
         search_filter: str,
         attributes: Optional[List[str]] = None,
         search_base: Optional[str] = None,
         query_sd: bool = False,
+        search_scope: str = 'SUBTREE',
     ) -> Generator[Dict[str, Any], None, None]:
         """
         Search via ADWS, yielding ldap3-compatible entries.
@@ -189,6 +198,7 @@ class ADWSClient:
             attributes: List of attributes to retrieve
             search_base: Base DN for search (defaults to domain base)
             query_sd: Whether to query security descriptors
+            search_scope: ldap3 scope constant ('BASE', 'LEVEL', or 'SUBTREE')
 
         Yields:
             Dict entries in ldap3 format: {'type': 'searchResEntry', 'dn': ..., 'attributes': ...}
@@ -211,11 +221,15 @@ class ADWSClient:
         if query_sd and "nTSecurityDescriptor" not in attr_list:
             attr_list.append("nTSecurityDescriptor")
 
+        adws_scope = self._SCOPE_MAP.get(str(search_scope).upper(), 'Subtree')
+
         try:
             results_xml = self._client.pull(
                 query=search_filter,
                 attributes=attr_list,
                 search_base=search_base,
+                scope=adws_scope,
+                query_sd=query_sd,
             )
 
             for entry in self._parse_xml_entries(results_xml):

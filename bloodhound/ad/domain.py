@@ -59,13 +59,19 @@ class ADDC(ADComputer):
     def adws_connect(self):
         """
         Connect to the ADWS service on port 9389.
+
+        Idempotent: returns immediately if a client is already established. This
+        avoids re-initiating Kerberos TGS requests on every DN resolution call
+        routed through ldap_connect(resolver=True), which previously caused
+        KRB-ERROR responses and crashed enumeration mid-run.
         """
         from bloodhound.ad.adws import ADWSClient
 
-        # Only log INFO on first connection
-        first_connect = self._adws_client is None
-        if first_connect:
-            logging.info('Connecting to ADWS at %s:9389', self.hostname)
+        # Reuse the existing connection if present
+        if self._adws_client is not None:
+            return True
+
+        logging.info('Connecting to ADWS at %s:9389', self.hostname)
 
         # Resolve hostname to IP
         ip = None
@@ -81,8 +87,7 @@ class ADDC(ADComputer):
         # Pass FQDN as hostname (needed for Kerberos SPN), resolved IP for TCP
         self._adws_client = ADWSClient(self.hostname, self.ad, target_ip=ip)
         self._adws_client.connect()
-        if first_connect:
-            logging.info('Successfully connected to ADWS')
+        logging.info('Successfully connected to ADWS')
         return True
 
     def ldap_connect(self, protocol=None, resolver=False):
@@ -246,11 +251,14 @@ class ADDC(ADComputer):
                 attr_list = list(attributes)
 
             # Use ADWS client search
+            # ldap3 search_scope constants are strings ('BASE', 'LEVEL', 'SUBTREE');
+            # the ADWS shim maps them to the dialect's scope names.
             for entry in self._adws_client.search(
                 search_filter=search_filter,
                 attributes=attr_list,
                 search_base=search_base,
-                query_sd=query_sd
+                query_sd=query_sd,
+                search_scope=search_scope,
             ):
                 yield entry
             return
@@ -454,9 +462,16 @@ class ADDC(ADComputer):
     def get_domains(self, acl=False):
         """
         Function to get domains. This should only return the current domain.
+
+        Attributes are listed explicitly so the ADWS path (which substitutes
+        minimal defaults for an empty list) still returns gPLink/gPOptions and
+        the other fields domains.py expects.
         """
+        properties = ['distinguishedName', 'objectSid', 'objectClass', 'objectGUID',
+                      'name', 'gPLink', 'gPOptions', 'msDS-Behavior-Version',
+                      'ms-DS-MachineAccountQuota', 'whencreated']
         entries = self.search('(objectClass=domain)',
-                              [],
+                              properties,
                               generator=True,
                               query_sd=acl)
 
@@ -990,9 +1005,6 @@ class AD(object):
         try:
             linkentry = self.dncache[distinguishedname.upper()]
         except KeyError:
-            if self.use_adws:
-                logging.debug('DN not in cache, skipping LDAP resolution in ADWS mode: %s', distinguishedname)
-                return None
             use_gc = ADUtils.ldap2domain(distinguishedname).lower() != self.domain.lower()
             qobject = self.objectresolver.resolve_distinguishedname(distinguishedname, use_gc=use_gc)
             if qobject is None:
