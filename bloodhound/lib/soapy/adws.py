@@ -32,6 +32,7 @@ from .soap_templates import (
     LDAP_PUT_FSTRING,
     LDAP_QUERY_FSTRING,
     NAMESPACES,
+    SD_FLAGS_CONTROL_XML,
 )
 
 
@@ -318,9 +319,12 @@ class ADWSConnect:
 
     def _query_enumeration(
         self, remoteName: str, nmf: ms_nmf.NMFConnection, query: str, attributes: list,
-        search_base: str | None = None
+        search_base: str | None = None, scope: str = "Subtree"
     ) -> str | None:
-        """Send the query and set up an enumeration context for the results."""
+        """Send the query and set up an enumeration context for the results.
+
+        scope: one of "Base", "OneLevel", "Subtree" (ADWS LdapQuery dialect values).
+        """
         fAttributes: str = ""
         for attr in attributes:
             fAttributes += (
@@ -338,6 +342,7 @@ class ADWSConnect:
             "query": query,
             "attributes": fAttributes,
             "baseobj": search_base,
+            "scope": scope,
         }
 
         enumeration = LDAP_QUERY_FSTRING.format(**query_vars)
@@ -354,13 +359,20 @@ class ADWSConnect:
         return enum_ctx.text if enum_ctx is not None else None
 
     def _pull_results(
-        self, remoteName: str, nmf: ms_nmf.NMFConnection, enum_ctx: str
+        self, remoteName: str, nmf: ms_nmf.NMFConnection, enum_ctx: str,
+        query_sd: bool = False,
     ) -> tuple[ElementTree.Element, bool]:
-        """Pull the results of an enumeration ctx from server."""
+        """Pull the results of an enumeration ctx from server.
+
+        When query_sd is True, the Pull request carries an SD_FLAGS LDAP control
+        (OID 1.2.840.113556.1.4.801) so the server returns nTSecurityDescriptor
+        without requiring SeSecurityPrivilege.
+        """
         pull_vars = {
             "uuid": str(uuid4()),
             "fqdn": remoteName,
             "enum_ctx": enum_ctx,
+            "controls": SD_FLAGS_CONTROL_XML if query_sd else "",
         }
 
         pull = LDAP_PULL_FSTRING.format(**pull_vars)
@@ -463,8 +475,15 @@ class ADWSConnect:
         attributes: list,
         search_base: str | None = None,
         print_incrementally: bool = False,
+        scope: str = "Subtree",
+        query_sd: bool = False,
     ) -> ElementTree.Element:
-        """Makes an LDAP query using ADWS to the specified server."""
+        """Makes an LDAP query using ADWS to the specified server.
+
+        scope: one of "Base", "OneLevel", "Subtree" (ADWS LdapQuery dialect values).
+        query_sd: when True, the Pull requests carry an SD_FLAGS control so the
+        server returns nTSecurityDescriptor without SeSecurityPrivilege.
+        """
         if self._resource != "Enumeration":
             raise NotImplementedError("Pull is only supported on 'pull' clients")
 
@@ -474,6 +493,7 @@ class ADWSConnect:
             query=query,
             attributes=attributes,
             search_base=search_base,
+            scope=scope,
         )
         if enum_ctx is None:
             logging.error(
@@ -486,7 +506,8 @@ class ADWSConnect:
         more_results = True
         while more_results:
             et, more_results = self._pull_results(
-                remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx
+                remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
+                query_sd=query_sd,
             )
             if len(et.findall(".//wsen:Items", namespaces=NAMESPACES)) == 0:
                 logging.debug("No objects returned in this batch")

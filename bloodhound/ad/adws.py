@@ -7,10 +7,14 @@ enumeration code.
 """
 
 import logging
+import threading
 from base64 import b64decode
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Generator
 from uuid import UUID
 from xml.etree import ElementTree
+
+from ldap3.utils.ciDict import CaseInsensitiveDict
 
 from bloodhound.lib.soapy import ADWSConnect, NTLMAuth, KerberosAuth, NAMESPACES
 from bloodhound.ad.utils import CollectionException
@@ -54,7 +58,9 @@ class ADWSClient:
         "objectClass",
     }
 
-    # Attributes that should be converted to integers (ADWS returns strings)
+    # Attributes that should be converted to integers (ADWS returns strings).
+    # Includes FILETIME-style attributes (100-ns intervals since 1601) that
+    # downstream code feeds into ADUtils.win_timestamp_to_unix as ints.
     INTEGER_ATTRIBUTES = {
         "userAccountControl",
         "systemFlags",
@@ -63,6 +69,7 @@ class ADWSClient:
         "primaryGroupID",
         "instanceType",
         "msDS-SupportedEncryptionTypes",
+        "msDS-Behavior-Version",
         "trustDirection",
         "trustType",
         "trustAttributes",
@@ -70,7 +77,48 @@ class ADWSClient:
         "adminCount",
         "logonCount",
         "badPwdCount",
+        # FILETIME-valued attributes
+        "lastLogon",
+        "lastLogonTimestamp",
+        "pwdLastSet",
+        "accountExpires",
+        "badPasswordTime",
+        "lockoutTime",
+        "lastLogoff",
     }
+
+    # Attributes ADWS returns as directory timestamps. The on-wire format
+    # varies: some servers emit GeneralizedTime ("20260501201908.0Z") while
+    # others emit XSD dateTime ("2026-05-01T20:19:08.0000000Z"). ldap3 parses
+    # both into Python datetime objects, and BloodHound's enumeration code
+    # calls .timetuple() on them, so we match that behavior here.
+    DATETIME_ATTRIBUTES = {
+        "whenCreated",
+        "whenChanged",
+    }
+    # Lower-cased view used for case-insensitive attribute-name matching.
+    _DATETIME_ATTRIBUTES_LOWER = {a.lower() for a in DATETIME_ATTRIBUTES}
+
+    @staticmethod
+    def _parse_ad_datetime(value: str) -> Optional[datetime]:
+        """Parse AD GeneralizedTime or XSD dateTime into a datetime.
+
+        Returns None if the input cannot be parsed in either format.
+        """
+        from datetime import timezone
+        s = value.strip()
+        # Try XSD dateTime first (contains separators)
+        if '-' in s or 'T' in s:
+            try:
+                return datetime.fromisoformat(s.replace('Z', '+00:00'))
+            except ValueError:
+                pass
+        # Try GeneralizedTime: YYYYMMDDHHMMSS[.f]Z or YYYYMMDDHHMMSSZ
+        core = s.rstrip('Z').split('.')[0]
+        try:
+            return datetime.strptime(core, '%Y%m%d%H%M%S').replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
 
     def __init__(self, hostname: str, ad: "AD", target_ip: str | None = None):
         """
@@ -86,6 +134,11 @@ class ADWSClient:
         self.ad = ad
         self._client: Optional[ADWSConnect] = None
         self._schema_classes: Optional[set] = None
+        # Serializes SOAP request/response cycles on the single shared TCP/NMF
+        # stream. Without this, the main enumeration thread and the ACL
+        # callback thread (from the multiprocessing pool's result callback)
+        # can interleave requests, corrupting frames and causing server RST.
+        self._io_lock = threading.Lock()
 
     def connect(self) -> None:
         """
@@ -153,11 +206,12 @@ class ADWSClient:
         self._schema_classes = set()
 
         try:
-            results = self._client.pull(
-                query="(objectClass=classSchema)",
-                attributes=["lDAPDisplayName"],
-                search_base=self.schema_naming_context,
-            )
+            with self._io_lock:
+                results = self._client.pull(
+                    query="(objectClass=classSchema)",
+                    attributes=["lDAPDisplayName"],
+                    search_base=self.schema_naming_context,
+                )
 
             for entry in self._parse_xml_entries(results):
                 name = entry['attributes'].get('lDAPDisplayName')
@@ -174,12 +228,21 @@ class ADWSClient:
                 'msDS-GroupManagedServiceAccount', 'msDS-ManagedServiceAccount'
             }
 
+    # Map from ldap3 search scope constants to ADWS LdapQuery dialect scope strings.
+    # ldap3 exposes these as strings: 'BASE', 'LEVEL', 'SUBTREE'.
+    _SCOPE_MAP = {
+        'BASE': 'Base',
+        'LEVEL': 'OneLevel',
+        'SUBTREE': 'Subtree',
+    }
+
     def search(
         self,
         search_filter: str,
         attributes: Optional[List[str]] = None,
         search_base: Optional[str] = None,
         query_sd: bool = False,
+        search_scope: str = 'SUBTREE',
     ) -> Generator[Dict[str, Any], None, None]:
         """
         Search via ADWS, yielding ldap3-compatible entries.
@@ -189,6 +252,7 @@ class ADWSClient:
             attributes: List of attributes to retrieve
             search_base: Base DN for search (defaults to domain base)
             query_sd: Whether to query security descriptors
+            search_scope: ldap3 scope constant ('BASE', 'LEVEL', or 'SUBTREE')
 
         Yields:
             Dict entries in ldap3 format: {'type': 'searchResEntry', 'dn': ..., 'attributes': ...}
@@ -211,12 +275,21 @@ class ADWSClient:
         if query_sd and "nTSecurityDescriptor" not in attr_list:
             attr_list.append("nTSecurityDescriptor")
 
+        adws_scope = self._SCOPE_MAP.get(str(search_scope).upper(), 'Subtree')
+
         try:
-            results_xml = self._client.pull(
-                query=search_filter,
-                attributes=attr_list,
-                search_base=search_base,
-            )
+            # Hold the lock only for the SOAP request/response. pull() completes
+            # its enumerate/pull loop before returning, so the lock does not span
+            # generator yields, which keeps consumers free to recurse back into
+            # search() without deadlocking.
+            with self._io_lock:
+                results_xml = self._client.pull(
+                    query=search_filter,
+                    attributes=attr_list,
+                    search_base=search_base,
+                    scope=adws_scope,
+                    query_sd=query_sd,
+                )
 
             for entry in self._parse_xml_entries(results_xml):
                 yield entry
@@ -249,12 +322,14 @@ class ADWSClient:
             attr_list = list(attributes)
 
         try:
-            # Use the DN as the search base with a simple filter
-            results_xml = self._client.pull(
-                query="(objectClass=*)",
-                attributes=attr_list,
-                search_base=dn,
-            )
+            # Use the DN as the search base with a simple filter.
+            # See search() for the rationale on the I/O lock.
+            with self._io_lock:
+                results_xml = self._client.pull(
+                    query="(objectClass=*)",
+                    attributes=attr_list,
+                    search_base=dn,
+                )
 
             entries = list(self._parse_xml_entries(results_xml))
             if entries:
@@ -292,8 +367,13 @@ class ADWSClient:
         Returns:
             Entry dict or None if parsing fails
         """
-        attributes: Dict[str, Any] = {}
-        raw_attributes: Dict[str, Any] = {}
+        # CaseInsensitiveDict matches ldap3's behavior. ADWS returns
+        # attribute names in their schema casing (e.g. "whenCreated"),
+        # but downstream enumeration code looks them up in mixed casing
+        # ("whencreated", "lastLogon", etc.). Without case-insensitive
+        # lookup, those reads silently fall back to defaults.
+        attributes: CaseInsensitiveDict = CaseInsensitiveDict()
+        raw_attributes: CaseInsensitiveDict = CaseInsensitiveDict()
         dn = None
 
         for attr in item:
@@ -380,6 +460,24 @@ class ADWSClient:
                     raw_values = values
                 except (ValueError, TypeError):
                     pass
+
+            # Parse directory timestamp strings into Python datetime objects.
+            # ldap3 returns datetimes for these, and BloodHound's property code
+            # (memberships.py) calls .timetuple() on them. ADWS can return
+            # either GeneralizedTime ("20260501201908.0Z") or XSD dateTime
+            # ("2026-05-01T20:19:08.0000000Z"); handle both.
+            elif attr_name.lower() in self._DATETIME_ATTRIBUTES_LOWER:
+                parsed: list = []
+                ok = True
+                for v in values:
+                    dt = self._parse_ad_datetime(v)
+                    if dt is None:
+                        ok = False
+                        break
+                    parsed.append(dt)
+                if ok:
+                    values = parsed
+                raw_values = [v.encode("utf-8") if isinstance(v, str) else v for v in raw_values]
 
             else:
                 # For string attributes, raw_attributes should contain bytes

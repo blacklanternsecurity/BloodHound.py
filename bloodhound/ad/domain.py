@@ -59,13 +59,19 @@ class ADDC(ADComputer):
     def adws_connect(self):
         """
         Connect to the ADWS service on port 9389.
+
+        Idempotent: returns immediately if a client is already established. This
+        avoids re-initiating Kerberos TGS requests on every DN resolution call
+        routed through ldap_connect(resolver=True), which previously caused
+        KRB-ERROR responses and crashed enumeration mid-run.
         """
         from bloodhound.ad.adws import ADWSClient
 
-        # Only log INFO on first connection
-        first_connect = self._adws_client is None
-        if first_connect:
-            logging.info('Connecting to ADWS at %s:9389', self.hostname)
+        # Reuse the existing connection if present
+        if self._adws_client is not None:
+            return True
+
+        logging.info('Connecting to ADWS at %s:9389', self.hostname)
 
         # Resolve hostname to IP
         ip = None
@@ -81,8 +87,7 @@ class ADDC(ADComputer):
         # Pass FQDN as hostname (needed for Kerberos SPN), resolved IP for TCP
         self._adws_client = ADWSClient(self.hostname, self.ad, target_ip=ip)
         self._adws_client.connect()
-        if first_connect:
-            logging.info('Successfully connected to ADWS')
+        logging.info('Successfully connected to ADWS')
         return True
 
     def ldap_connect(self, protocol=None, resolver=False):
@@ -235,22 +240,33 @@ class ADDC(ADComputer):
             if not search_base:  # Handle None and empty string
                 search_base = self.ad.baseDN
 
-            # Convert attributes to list if needed
-            # ADWS requires explicit attribute lists - it doesn't handle empty lists well
+            # ADWS has no ALL_ATTRIBUTES equivalent. When a caller passes an
+            # empty list (relying on LDAP's ALL_ATTRIBUTES behavior), substitute
+            # a broad default covering the common fields enumeration code
+            # reads. Don't shrink it to the bare identity trio or attributes
+            # like gPLink on the domain object get silently dropped.
             if attributes is None or attributes == []:
-                # Provide minimal default attributes for ADWS
-                attr_list = ['distinguishedName', 'objectSid', 'objectClass']
+                attr_list = [
+                    'distinguishedName', 'objectSid', 'objectClass', 'objectGUID',
+                    'sAMAccountName', 'sAMAccountType', 'name', 'description',
+                    'whenCreated', 'whenChanged', 'displayName',
+                    'gPLink', 'gPOptions', 'nETBIOSName', 'nCName',
+                    'msDS-Behavior-Version', 'ms-DS-MachineAccountQuota',
+                ]
             elif isinstance(attributes, str):
                 attr_list = [attributes]
             else:
                 attr_list = list(attributes)
 
             # Use ADWS client search
+            # ldap3 search_scope constants are strings ('BASE', 'LEVEL', 'SUBTREE');
+            # the ADWS shim maps them to the dialect's scope names.
             for entry in self._adws_client.search(
                 search_filter=search_filter,
                 attributes=attr_list,
                 search_base=search_base,
-                query_sd=query_sd
+                query_sd=query_sd,
+                search_scope=search_scope,
             ):
                 yield entry
             return
@@ -990,9 +1006,6 @@ class AD(object):
         try:
             linkentry = self.dncache[distinguishedname.upper()]
         except KeyError:
-            if self.use_adws:
-                logging.debug('DN not in cache, skipping LDAP resolution in ADWS mode: %s', distinguishedname)
-                return None
             use_gc = ADUtils.ldap2domain(distinguishedname).lower() != self.domain.lower()
             qobject = self.objectresolver.resolve_distinguishedname(distinguishedname, use_gc=use_gc)
             if qobject is None:
