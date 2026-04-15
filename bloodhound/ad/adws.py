@@ -9,9 +9,12 @@ enumeration code.
 import logging
 import threading
 from base64 import b64decode
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Generator
 from uuid import UUID
 from xml.etree import ElementTree
+
+from ldap3.utils.ciDict import CaseInsensitiveDict
 
 from bloodhound.lib.soapy import ADWSConnect, NTLMAuth, KerberosAuth, NAMESPACES
 from bloodhound.ad.utils import CollectionException
@@ -55,7 +58,9 @@ class ADWSClient:
         "objectClass",
     }
 
-    # Attributes that should be converted to integers (ADWS returns strings)
+    # Attributes that should be converted to integers (ADWS returns strings).
+    # Includes FILETIME-style attributes (100-ns intervals since 1601) that
+    # downstream code feeds into ADUtils.win_timestamp_to_unix as ints.
     INTEGER_ATTRIBUTES = {
         "userAccountControl",
         "systemFlags",
@@ -64,6 +69,7 @@ class ADWSClient:
         "primaryGroupID",
         "instanceType",
         "msDS-SupportedEncryptionTypes",
+        "msDS-Behavior-Version",
         "trustDirection",
         "trustType",
         "trustAttributes",
@@ -71,6 +77,22 @@ class ADWSClient:
         "adminCount",
         "logonCount",
         "badPwdCount",
+        # FILETIME-valued attributes
+        "lastLogon",
+        "lastLogonTimestamp",
+        "pwdLastSet",
+        "accountExpires",
+        "badPasswordTime",
+        "lockoutTime",
+        "lastLogoff",
+    }
+
+    # Attributes ADWS returns as XSD dateTime strings (e.g. "2026-05-01T20:19:08.0000000Z").
+    # ldap3 parses these as Python datetime objects, and BloodHound's enumeration
+    # code calls .timetuple() on them, so we match that behavior here.
+    DATETIME_ATTRIBUTES = {
+        "whenCreated",
+        "whenChanged",
     }
 
     def __init__(self, hostname: str, ad: "AD", target_ip: str | None = None):
@@ -320,8 +342,13 @@ class ADWSClient:
         Returns:
             Entry dict or None if parsing fails
         """
-        attributes: Dict[str, Any] = {}
-        raw_attributes: Dict[str, Any] = {}
+        # CaseInsensitiveDict matches ldap3's behavior. ADWS returns
+        # attribute names in their schema casing (e.g. "whenCreated"),
+        # but downstream enumeration code looks them up in mixed casing
+        # ("whencreated", "lastLogon", etc.). Without case-insensitive
+        # lookup, those reads silently fall back to defaults.
+        attributes: CaseInsensitiveDict = CaseInsensitiveDict()
+        raw_attributes: CaseInsensitiveDict = CaseInsensitiveDict()
         dn = None
 
         for attr in item:
@@ -406,6 +433,22 @@ class ADWSClient:
                 try:
                     values = [int(v) for v in values]
                     raw_values = values
+                except (ValueError, TypeError):
+                    pass
+
+            # Parse XSD dateTime strings into Python datetime objects.
+            # ldap3 returns datetimes for these, and BloodHound's property code
+            # (memberships.py) calls .timetuple() on them.
+            elif attr_name in self.DATETIME_ATTRIBUTES:
+                try:
+                    parsed = []
+                    for v in values:
+                        # fromisoformat in Python 3.11+ accepts the trailing 'Z'
+                        # and any fractional-second precision. Replace to be safe
+                        # on 3.10 as well.
+                        parsed.append(datetime.fromisoformat(v.replace('Z', '+00:00')))
+                    values = parsed
+                    raw_values = [v.encode("utf-8") for v in raw_values]
                 except (ValueError, TypeError):
                     pass
 
