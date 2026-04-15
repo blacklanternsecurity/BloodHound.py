@@ -87,13 +87,38 @@ class ADWSClient:
         "lastLogoff",
     }
 
-    # Attributes ADWS returns as XSD dateTime strings (e.g. "2026-05-01T20:19:08.0000000Z").
-    # ldap3 parses these as Python datetime objects, and BloodHound's enumeration
-    # code calls .timetuple() on them, so we match that behavior here.
+    # Attributes ADWS returns as directory timestamps. The on-wire format
+    # varies: some servers emit GeneralizedTime ("20260501201908.0Z") while
+    # others emit XSD dateTime ("2026-05-01T20:19:08.0000000Z"). ldap3 parses
+    # both into Python datetime objects, and BloodHound's enumeration code
+    # calls .timetuple() on them, so we match that behavior here.
     DATETIME_ATTRIBUTES = {
         "whenCreated",
         "whenChanged",
     }
+    # Lower-cased view used for case-insensitive attribute-name matching.
+    _DATETIME_ATTRIBUTES_LOWER = {a.lower() for a in DATETIME_ATTRIBUTES}
+
+    @staticmethod
+    def _parse_ad_datetime(value: str) -> Optional[datetime]:
+        """Parse AD GeneralizedTime or XSD dateTime into a datetime.
+
+        Returns None if the input cannot be parsed in either format.
+        """
+        from datetime import timezone
+        s = value.strip()
+        # Try XSD dateTime first (contains separators)
+        if '-' in s or 'T' in s:
+            try:
+                return datetime.fromisoformat(s.replace('Z', '+00:00'))
+            except ValueError:
+                pass
+        # Try GeneralizedTime: YYYYMMDDHHMMSS[.f]Z or YYYYMMDDHHMMSSZ
+        core = s.rstrip('Z').split('.')[0]
+        try:
+            return datetime.strptime(core, '%Y%m%d%H%M%S').replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
 
     def __init__(self, hostname: str, ad: "AD", target_ip: str | None = None):
         """
@@ -436,21 +461,23 @@ class ADWSClient:
                 except (ValueError, TypeError):
                     pass
 
-            # Parse XSD dateTime strings into Python datetime objects.
+            # Parse directory timestamp strings into Python datetime objects.
             # ldap3 returns datetimes for these, and BloodHound's property code
-            # (memberships.py) calls .timetuple() on them.
-            elif attr_name in self.DATETIME_ATTRIBUTES:
-                try:
-                    parsed = []
-                    for v in values:
-                        # fromisoformat in Python 3.11+ accepts the trailing 'Z'
-                        # and any fractional-second precision. Replace to be safe
-                        # on 3.10 as well.
-                        parsed.append(datetime.fromisoformat(v.replace('Z', '+00:00')))
+            # (memberships.py) calls .timetuple() on them. ADWS can return
+            # either GeneralizedTime ("20260501201908.0Z") or XSD dateTime
+            # ("2026-05-01T20:19:08.0000000Z"); handle both.
+            elif attr_name.lower() in self._DATETIME_ATTRIBUTES_LOWER:
+                parsed: list = []
+                ok = True
+                for v in values:
+                    dt = self._parse_ad_datetime(v)
+                    if dt is None:
+                        ok = False
+                        break
+                    parsed.append(dt)
+                if ok:
                     values = parsed
-                    raw_values = [v.encode("utf-8") for v in raw_values]
-                except (ValueError, TypeError):
-                    pass
+                raw_values = [v.encode("utf-8") if isinstance(v, str) else v for v in raw_values]
 
             else:
                 # For string attributes, raw_attributes should contain bytes
