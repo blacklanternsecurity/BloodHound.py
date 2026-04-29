@@ -136,6 +136,7 @@ class ADWSClient:
         self._schema_classes: Optional[set] = None
         self._configuration_naming_context: Optional[str] = None
         self._schema_naming_context: Optional[str] = None
+        self._config_nc_accessible: bool = False
         # Serializes SOAP request/response cycles on the single shared TCP/NMF
         # stream. Without this, the main enumeration thread and the ACL
         # callback thread (from the multiprocessing pool's result callback)
@@ -203,6 +204,7 @@ class ADWSClient:
             for _ in self._parse_xml_entries(results_xml):
                 self._configuration_naming_context = candidate_config
                 self._schema_naming_context = f"CN=Schema,{candidate_config}"
+                self._config_nc_accessible = True
                 logging.debug('Found configuration NC: %s', candidate_config)
                 return
         except Exception as e:
@@ -250,6 +252,14 @@ class ADWSClient:
 
     def _query_schema_classes(self) -> None:
         """Query schema to populate object class cache."""
+        if not self._config_nc_accessible:
+            self._schema_classes = {
+                'user', 'group', 'computer', 'organizationalUnit', 'container',
+                'groupPolicyContainer', 'trustedDomain', 'domain',
+                'msDS-GroupManagedServiceAccount', 'msDS-ManagedServiceAccount'
+            }
+            return
+
         self._schema_classes = set()
 
         try:
@@ -309,6 +319,12 @@ class ADWSClient:
 
         if not search_base:  # Handle None and empty string
             search_base = self.ad.baseDN
+
+        # On child domain DCs the schema NC lives on the forest root.  Querying it
+        # triggers server-side referral-following that leaves the ADWS service unable
+        # to process any subsequent request (NoConnectionAvailable).  Skip silently.
+        if not self._config_nc_accessible and 'cn=schema,' in search_base.lower():
+            return
 
         # ADWS requires explicit attribute lists - provide minimal defaults if none specified
         if attributes is None or len(attributes) == 0:
