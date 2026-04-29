@@ -9,7 +9,7 @@ import logging
 import socket
 from base64 import b64decode
 from enum import IntFlag
-from typing import Self, Type
+from typing import Generator, Self, Type
 from uuid import UUID, uuid4
 from xml.etree import ElementTree
 
@@ -516,6 +516,42 @@ class ADWSConnect:
                     results.append(item)
 
         return results
+
+    def enumerate_batches(
+        self,
+        query: str,
+        attributes: list,
+        search_base: str | None = None,
+        scope: str = "Subtree",
+        query_sd: bool = False,
+    ) -> Generator[ElementTree.Element, None, None]:
+        """Enumerate results one batch (256 objects) at a time.
+
+        Unlike pull(), this yields one ElementTree element per Pull response
+        so the caller can process and release results between round-trips
+        rather than buffering the entire result set in memory.
+        """
+        if self._resource != "Enumeration":
+            raise NotImplementedError("Pull is only supported on 'pull' clients")
+
+        enum_ctx = self._query_enumeration(
+            remoteName=self._fqdn,
+            nmf=self._nmf,
+            query=query,
+            attributes=attributes,
+            search_base=search_base,
+            scope=scope,
+        )
+        if enum_ctx is None:
+            raise ValueError("unable to get enumeration context")
+
+        more_results = True
+        while more_results:
+            et, more_results = self._pull_results(
+                remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
+                query_sd=query_sd,
+            )
+            yield et
 
     @classmethod
     def pull_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth, target_ip: str | None = None) -> Self:

@@ -341,21 +341,27 @@ class ADWSClient:
         adws_scope = self._SCOPE_MAP.get(str(search_scope).upper(), 'Subtree')
 
         try:
-            # Hold the lock only for the SOAP request/response. pull() completes
-            # its enumerate/pull loop before returning, so the lock does not span
-            # generator yields, which keeps consumers free to recurse back into
-            # search() without deadlocking.
-            with self._io_lock:
-                results_xml = self._client.pull(
-                    query=search_filter,
-                    attributes=attr_list,
-                    search_base=search_base,
-                    scope=adws_scope,
-                    query_sd=query_sd,
-                )
-
-            for entry in self._parse_xml_entries(results_xml):
-                yield entry
+            # enumerate_batches() yields one XML batch (≤256 objects) per Pull
+            # response.  The lock is held only for each individual Enumerate or
+            # Pull round-trip so other threads (e.g. the ACL pool callback) can
+            # interleave their own requests between batches.  Results are yielded
+            # to the caller as each batch arrives rather than after the full
+            # result set is buffered in memory.
+            batch_gen = self._client.enumerate_batches(
+                query=search_filter,
+                attributes=attr_list,
+                search_base=search_base,
+                scope=adws_scope,
+                query_sd=query_sd,
+            )
+            while True:
+                with self._io_lock:
+                    try:
+                        batch_et = next(batch_gen)
+                    except StopIteration:
+                        break
+                for entry in self._parse_xml_entries(batch_et):
+                    yield entry
 
         except Exception as e:
             logging.warning('ADWS search %r failed: %s', search_filter, e)
