@@ -482,16 +482,12 @@ class ADWSClient:
                 except Exception:
                     pass
 
-            # Handle sIDHistory (array of SIDs)
+            # Handle sIDHistory - keep as raw bytes so downstream code
+            # (memberships.py) can call LDAP_SID() on it, matching LDAP path behavior.
             elif attr_name == "sIDHistory":
                 try:
-                    decoded_values = []
-                    for v in values:
-                        sid = LDAP_SID(data=b64decode(v))
-                        decoded_values.append(sid.formatCanonical())
-                    values = decoded_values
-                    # Keep raw as binary for compatibility
-                    raw_values = [b64decode(v) for v in raw_values]
+                    raw_values = [b64decode(v) for v in values]
+                    values = raw_values
                 except Exception:
                     pass
 
