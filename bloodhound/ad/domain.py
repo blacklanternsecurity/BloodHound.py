@@ -408,9 +408,12 @@ class ADDC(ADComputer):
             entries = self.search('(ncname=%s)' % context,
                                   ['nETBIOSName'],
                                   search_base=search_base)
+            return next(entries)
         except (LDAPAttributeError, LDAPCursorError) as e:
             logging.warning('Could not determine NetBiosname of the domain: %s', str(e))
-        return next(entries)
+        except StopIteration:
+            logging.warning('Could not determine NetBiosname of the domain: no results for %s', context)
+        return None
 
     def get_objecttype(self):
         """
@@ -484,11 +487,9 @@ class ADDC(ADComputer):
             domain_object = ADDomain.fromLDAP(entry['attributes']['distinguishedName'], entry['attributes']['objectSid'])
             self.ad.domain_object = domain_object
             self.ad.domains[entry['attributes']['distinguishedName']] = entry
-            try:
-                nbentry = self.get_netbios_name(entry['attributes']['distinguishedName'])
+            nbentry = self.get_netbios_name(entry['attributes']['distinguishedName'])
+            if nbentry is not None:
                 self.ad.nbdomains[nbentry['attributes']['nETBIOSName']] = entry
-            except IndexError:
-                pass
 
         if entriesNum == 0:
             # Raise exception if we somehow managed to authenticate but the domain is wrong

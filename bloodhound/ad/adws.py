@@ -134,6 +134,8 @@ class ADWSClient:
         self.ad = ad
         self._client: Optional[ADWSConnect] = None
         self._schema_classes: Optional[set] = None
+        self._configuration_naming_context: Optional[str] = None
+        self._schema_naming_context: Optional[str] = None
         # Serializes SOAP request/response cycles on the single shared TCP/NMF
         # stream. Without this, the main enumeration thread and the ACL
         # callback thread (from the multiprocessing pool's result callback)
@@ -173,19 +175,58 @@ class ADWSClient:
                 target_ip=self.target_ip,
             )
             logging.debug('Successfully connected to ADWS')
+            self._fetch_naming_contexts()
+        except CollectionException:
+            raise
         except Exception as e:
             logging.error('ADWS connection failed: %s', str(e))
             raise CollectionException(f'ADWS connection failed: {e}. No LDAP fallback in ADWS mode.')
 
+    def _fetch_naming_contexts(self) -> None:
+        """Query RootDSE to get the actual configuration and schema naming contexts.
+
+        Child domains (e.g. corp.example.com) have their config/schema partitions
+        rooted at the forest root (e.g. CN=Configuration,DC=example,DC=com), not at
+        the current domain base.  Hardcoding from baseDN breaks for those cases.
+        """
+        try:
+            with self._io_lock:
+                results_xml = self._client.pull(
+                    query='(objectClass=*)',
+                    attributes=['configurationNamingContext', 'schemaNamingContext'],
+                    search_base='',
+                    scope='Base',
+                )
+            for entry in self._parse_xml_entries(results_xml):
+                attrs = entry.get('attributes', {})
+                cnc = attrs.get('configurationNamingContext')
+                snc = attrs.get('schemaNamingContext')
+                if cnc:
+                    self._configuration_naming_context = str(cnc)
+                if snc:
+                    self._schema_naming_context = str(snc)
+                break
+        except Exception as e:
+            logging.debug('Could not query RootDSE for naming contexts, will use constructed values: %s', e)
+
+        if not self._configuration_naming_context:
+            self._configuration_naming_context = f"CN=Configuration,{self.ad.baseDN}"
+        if not self._schema_naming_context:
+            self._schema_naming_context = f"CN=Schema,{self._configuration_naming_context}"
+
     @property
     def configuration_naming_context(self) -> str:
         """Return configuration partition base DN."""
+        if self._configuration_naming_context is not None:
+            return self._configuration_naming_context
         return f"CN=Configuration,{self.ad.baseDN}"
 
     @property
     def schema_naming_context(self) -> str:
         """Return schema partition base DN."""
-        return f"CN=Schema,CN=Configuration,{self.ad.baseDN}"
+        if self._schema_naming_context is not None:
+            return self._schema_naming_context
+        return f"CN=Schema,{self.configuration_naming_context}"
 
     def supports_object_class(self, class_name: str) -> bool:
         """
