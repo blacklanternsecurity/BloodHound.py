@@ -22,6 +22,7 @@
 #
 ####################
 import logging
+import multiprocessing
 from multiprocessing import Pool
 from impacket.uuid import string_to_bin, bin_to_string
 from bloodhound.lib import cstruct
@@ -298,7 +299,11 @@ class AclEnumerator(object):
         self.pool = None
 
     def init_pool(self):
-        self.pool = Pool()
+        # Python 3.14 changed the default start method on Linux to forkserver,
+        # which re-imports __main__ and crashes without an if __name__ == '__main__' guard.
+        # Fork is safe here since no threads exist yet at pool creation time.
+        ctx = multiprocessing.get_context('fork')
+        self.pool = ctx.Pool()
 
 """
 The following is Security Descriptor parsing using cstruct
