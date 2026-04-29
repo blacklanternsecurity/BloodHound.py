@@ -279,7 +279,7 @@ def ace_applies(ace_guid, object_class, objecttype_guid_map):
     Note that this function assumes you already verified that InheritedObjectType is set (via the flag).
     If this is not set, the ACE applies to all object types.
     '''
-    if ace_guid == objecttype_guid_map[object_class]:
+    if object_class in objecttype_guid_map and ace_guid == objecttype_guid_map[object_class]:
         return True
     # If none of these match, the ACE does not apply to this object
     return False

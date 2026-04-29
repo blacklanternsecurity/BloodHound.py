@@ -183,39 +183,42 @@ class ADWSClient:
             raise CollectionException(f'ADWS connection failed: {e}. No LDAP fallback in ADWS mode.')
 
     def _fetch_naming_contexts(self) -> None:
-        """Discover the configuration NC by probing candidate paths.
+        """Probe the current domain's configuration NC and use it if accessible.
 
-        Child domains (e.g. corp.example.com) have their config/schema partitions
-        at the forest root (e.g. CN=Configuration,DC=example,DC=com), not at the
-        current domain base.  We walk up the DN hierarchy until the partitions
-        container responds.  Querying RootDSE with an empty base DN causes some
-        ADWS servers to hang; non-empty wrong-path queries return error 32 quickly,
-        so this walk-up approach avoids any blocking.
+        Only the current domain base is probed.  Probing parent/forest-root paths
+        triggers ADWS referral-following on the server side, which can leave the
+        ADWS service unable to process subsequent domain NC queries.  A wrong-but-
+        local path (error 32 / NO_OBJECT) is safe; a cross-partition referral is not.
         """
-        parts = self.ad.baseDN.split(',')
-        for i in range(len(parts) - 1):
-            candidate_dn = ','.join(parts[i:])
-            candidate_config = f"CN=Configuration,{candidate_dn}"
-            partitions_dn = f"CN=Partitions,{candidate_config}"
-            try:
-                with self._io_lock:
-                    results_xml = self._client.pull(
-                        query='(objectClass=crossRefContainer)',
-                        attributes=['distinguishedName'],
-                        search_base=partitions_dn,
-                        scope='Base',
-                    )
-                for _ in self._parse_xml_entries(results_xml):
-                    self._configuration_naming_context = candidate_config
-                    self._schema_naming_context = f"CN=Schema,{candidate_config}"
-                    logging.debug('Found configuration NC: %s', candidate_config)
-                    return
-            except Exception as e:
-                logging.debug('Config NC candidate %s not found: %s', candidate_config, e)
+        candidate_config = f"CN=Configuration,{self.ad.baseDN}"
+        partitions_dn = f"CN=Partitions,{candidate_config}"
+        try:
+            with self._io_lock:
+                results_xml = self._client.pull(
+                    query='(objectClass=crossRefContainer)',
+                    attributes=['distinguishedName'],
+                    search_base=partitions_dn,
+                    scope='Base',
+                )
+            for _ in self._parse_xml_entries(results_xml):
+                self._configuration_naming_context = candidate_config
+                self._schema_naming_context = f"CN=Schema,{candidate_config}"
+                logging.debug('Found configuration NC: %s', candidate_config)
+                return
+        except Exception as e:
+            logging.debug('Config NC not found at %s: %s', candidate_config, e)
 
-        logging.debug('Could not discover configuration NC; using constructed values')
-        self._configuration_naming_context = f"CN=Configuration,{self.ad.baseDN}"
-        self._schema_naming_context = f"CN=Schema,{self._configuration_naming_context}"
+        # Config NC is not hosted by this DC (child domain DC pointing at forest root
+        # config partition).  Keep using the constructed local path so all config NC
+        # searches fail fast with NO_OBJECT rather than triggering referrals that
+        # break the ADWS service for subsequent domain NC queries.
+        logging.warning(
+            'Configuration partition is not accessible via this DC; '
+            'schema/trust/NetBIOS data will be unavailable. '
+            'For full collection, connect to a forest root DC.'
+        )
+        self._configuration_naming_context = candidate_config
+        self._schema_naming_context = f"CN=Schema,{candidate_config}"
 
     @property
     def configuration_naming_context(self) -> str:
