@@ -183,36 +183,39 @@ class ADWSClient:
             raise CollectionException(f'ADWS connection failed: {e}. No LDAP fallback in ADWS mode.')
 
     def _fetch_naming_contexts(self) -> None:
-        """Query RootDSE to get the actual configuration and schema naming contexts.
+        """Discover the configuration NC by probing candidate paths.
 
         Child domains (e.g. corp.example.com) have their config/schema partitions
-        rooted at the forest root (e.g. CN=Configuration,DC=example,DC=com), not at
-        the current domain base.  Hardcoding from baseDN breaks for those cases.
+        at the forest root (e.g. CN=Configuration,DC=example,DC=com), not at the
+        current domain base.  We walk up the DN hierarchy until the partitions
+        container responds.  Querying RootDSE with an empty base DN causes some
+        ADWS servers to hang; non-empty wrong-path queries return error 32 quickly,
+        so this walk-up approach avoids any blocking.
         """
-        try:
-            with self._io_lock:
-                results_xml = self._client.pull(
-                    query='(objectClass=*)',
-                    attributes=['configurationNamingContext', 'schemaNamingContext'],
-                    search_base='',
-                    scope='Base',
-                )
-            for entry in self._parse_xml_entries(results_xml):
-                attrs = entry.get('attributes', {})
-                cnc = attrs.get('configurationNamingContext')
-                snc = attrs.get('schemaNamingContext')
-                if cnc:
-                    self._configuration_naming_context = str(cnc)
-                if snc:
-                    self._schema_naming_context = str(snc)
-                break
-        except Exception as e:
-            logging.debug('Could not query RootDSE for naming contexts, will use constructed values: %s', e)
+        parts = self.ad.baseDN.split(',')
+        for i in range(len(parts) - 1):
+            candidate_dn = ','.join(parts[i:])
+            candidate_config = f"CN=Configuration,{candidate_dn}"
+            partitions_dn = f"CN=Partitions,{candidate_config}"
+            try:
+                with self._io_lock:
+                    results_xml = self._client.pull(
+                        query='(objectClass=crossRefContainer)',
+                        attributes=['distinguishedName'],
+                        search_base=partitions_dn,
+                        scope='Base',
+                    )
+                for _ in self._parse_xml_entries(results_xml):
+                    self._configuration_naming_context = candidate_config
+                    self._schema_naming_context = f"CN=Schema,{candidate_config}"
+                    logging.debug('Found configuration NC: %s', candidate_config)
+                    return
+            except Exception as e:
+                logging.debug('Config NC candidate %s not found: %s', candidate_config, e)
 
-        if not self._configuration_naming_context:
-            self._configuration_naming_context = f"CN=Configuration,{self.ad.baseDN}"
-        if not self._schema_naming_context:
-            self._schema_naming_context = f"CN=Schema,{self._configuration_naming_context}"
+        logging.debug('Could not discover configuration NC; using constructed values')
+        self._configuration_naming_context = f"CN=Configuration,{self.ad.baseDN}"
+        self._schema_naming_context = f"CN=Schema,{self._configuration_naming_context}"
 
     @property
     def configuration_naming_context(self) -> str:
