@@ -354,13 +354,26 @@ class ADWSClient:
                 scope=adws_scope,
                 query_sd=query_sd,
             )
+            batch_num = 0
+            total_yielded = 0
             while True:
                 with self._io_lock:
                     try:
                         batch_et = next(batch_gen)
                     except StopIteration:
                         break
+                    except Exception as e:
+                        if batch_num == 0:
+                            logging.warning('ADWS search %r failed: %s', search_filter, e)
+                        else:
+                            logging.warning(
+                                'ADWS search %r truncated after %d objects (batch %d failed): %s',
+                                search_filter, total_yielded, batch_num, e,
+                            )
+                        break
+                batch_num += 1
                 for entry in self._parse_xml_entries(batch_et):
+                    total_yielded += 1
                     yield entry
 
         except Exception as e:
