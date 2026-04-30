@@ -147,6 +147,11 @@ class MembershipEnumerator(object):
             # Skip trust objects
             if resolved_entry['type'] == 'trustaccount':
                 continue
+            # In ADWS child-DC mode the users filter falls back to objectClass=user
+            # which also matches computers (they inherit from user/person).  Filter
+            # them out here so users.json contains only real users.
+            if resolved_entry['type'] == 'computer':
+                continue
             user = {
                 "AllowedToDelegate": [],
                 "ObjectIdentifier": ADUtils.get_entry_property(entry, 'objectSid'),
