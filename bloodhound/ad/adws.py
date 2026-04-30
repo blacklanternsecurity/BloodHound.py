@@ -141,7 +141,10 @@ class ADWSClient:
         # stream. Without this, the main enumeration thread and the ACL
         # callback thread (from the multiprocessing pool's result callback)
         # can interleave requests, corrupting frames and causing server RST.
-        self._io_lock = threading.Lock()
+        # RLock (reentrant) is required because search() holds the lock across
+        # yield points, and callers may call a nested search() within their
+        # iteration loop (e.g. get_domains() calling get_netbios_name()).
+        self._io_lock = threading.RLock()
 
     def connect(self) -> None:
         """
