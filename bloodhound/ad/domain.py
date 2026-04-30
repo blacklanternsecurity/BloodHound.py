@@ -662,7 +662,16 @@ class ADDC(ADComputer):
             logging.debug('No support for SMSA, skipping in query')
             smsa_filter = ''
 
-        if gmsa_filter or smsa_filter:
+        if self.use_adws:
+            # objectCategory=person requires schema NC resolution which is unavailable
+            # on child-domain DCs.  objectClass=user is schema-free and matches the
+            # same population; downstream enumerate_users() already filters by
+            # sAMAccountType via resolve_ad_entry so computers are excluded.
+            if gmsa_filter or smsa_filter:
+                query = '(|(&(objectClass=user)(objectClass=person)){}{})'.format(gmsa_filter, smsa_filter)
+            else:
+                query = '(&(objectClass=user)(objectClass=person))'
+        elif gmsa_filter or smsa_filter:
             query = '(|(&(objectCategory=person)(objectClass=user)){}{})'.format(gmsa_filter, smsa_filter)
         else:
             query = '(&(objectCategory=person)(objectClass=user))'
@@ -718,7 +727,11 @@ class ADDC(ADComputer):
         else:
             smsa_filter = ''
 
-        if gmsa_filter or smsa_filter:
+        if self.use_adws:
+            # sAMAccountType NOT filters cause ADWS on child DCs to silently return
+            # 0 results.  objectClass=computer is schema-free and sufficient.
+            query = '(objectClass=computer)'
+        elif gmsa_filter or smsa_filter:
             query = '(&(sAMAccountType=805306369){}{})'.format(gmsa_filter, smsa_filter)
         else:
             query = '(&(sAMAccountType=805306369))'
