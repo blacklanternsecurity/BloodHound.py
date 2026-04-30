@@ -150,7 +150,8 @@ class MembershipEnumerator(object):
             # In ADWS child-DC mode the users filter falls back to objectClass=user
             # which also matches computers (they inherit from user/person).  Filter
             # them out here so users.json contains only real users.
-            if resolved_entry['type'] == 'computer':
+            # resolve_ad_entry returns 'Computer' (capitalized) for computer accounts.
+            if resolved_entry['type'].lower() == 'computer':
                 continue
             user = {
                 "AllowedToDelegate": [],
