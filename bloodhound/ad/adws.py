@@ -141,10 +141,7 @@ class ADWSClient:
         # stream. Without this, the main enumeration thread and the ACL
         # callback thread (from the multiprocessing pool's result callback)
         # can interleave requests, corrupting frames and causing server RST.
-        # RLock (reentrant) is required because search() holds the lock across
-        # yield points, and callers may call a nested search() within their
-        # iteration loop (e.g. get_domains() calling get_netbios_name()).
-        self._io_lock = threading.RLock()
+        self._io_lock = threading.Lock()
 
     def connect(self) -> None:
         """
@@ -348,42 +345,55 @@ class ADWSClient:
         adws_scope = self._SCOPE_MAP.get(str(search_scope).upper(), 'Subtree')
 
         try:
-            # Hold the lock for the entire Enumerate+Pull sequence of a single query.
-            # Releasing between batches allows ACL callback threads to interleave ADWS
-            # SID-resolution requests, but the inter-batch delay this causes can exceed
-            # the server's enumeration-context lifetime, resulting in "Invalid
-            # Enumeration Context" errors mid-query.  Holding the lock throughout keeps
-            # pulls fast enough that the context stays alive.  ACL callbacks still run —
-            # they just queue up and execute once this query completes.  The lock is
-            # released across `yield` suspension points, so it is not held while the
-            # caller processes each entry.
-            batch_gen = self._client.enumerate_batches(
-                query=search_filter,
-                attributes=attr_list,
-                search_base=search_base,
-                scope=adws_scope,
-                query_sd=query_sd,
-            )
+            # The lock is held only for each individual Pull round-trip.  Between
+            # batches it is released so ACL callback threads can make their own
+            # requests.  If the server returns "Invalid Enumeration Context" on a
+            # later batch (enum context expired due to inter-batch delay), we restart
+            # the enumeration and skip already-yielded objects by their DN to avoid
+            # duplicates.
+            seen_dns: set = set()
+            restart = True
             batch_num = 0
             total_yielded = 0
-            with self._io_lock:
+
+            while restart:
+                restart = False
+                batch_gen = self._client.enumerate_batches(
+                    query=search_filter,
+                    attributes=attr_list,
+                    search_base=search_base,
+                    scope=adws_scope,
+                    query_sd=query_sd,
+                )
                 while True:
-                    try:
-                        batch_et = next(batch_gen)
-                    except StopIteration:
-                        break
-                    except Exception as e:
-                        if batch_num == 0:
-                            logging.warning('ADWS search %r failed: %s', search_filter, e)
-                        else:
-                            logging.warning(
-                                'ADWS search %r truncated after %d objects (batch %d failed): %s',
-                                search_filter, total_yielded, batch_num, e,
-                            )
-                        break
+                    with self._io_lock:
+                        try:
+                            batch_et = next(batch_gen)
+                        except StopIteration:
+                            break
+                        except Exception as e:
+                            err = str(e)
+                            if batch_num == 0:
+                                logging.warning('ADWS search %r failed: %s', search_filter, e)
+                            elif 'EnumerationContext' in err or 'enum' in err.lower():
+                                logging.debug(
+                                    'ADWS search %r enum context expired after %d objects; retrying',
+                                    search_filter, total_yielded,
+                                )
+                                restart = True
+                            else:
+                                logging.warning(
+                                    'ADWS search %r truncated after %d objects (batch %d failed): %s',
+                                    search_filter, total_yielded, batch_num, e,
+                                )
+                            break
                     batch_num += 1
                     batch_count = 0
                     for entry in self._parse_xml_entries(batch_et):
+                        dn = entry.get('dn', '')
+                        if dn in seen_dns:
+                            continue
+                        seen_dns.add(dn)
                         total_yielded += 1
                         batch_count += 1
                         yield entry
