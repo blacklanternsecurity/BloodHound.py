@@ -253,10 +253,14 @@ class ADWSClient:
     def _query_schema_classes(self) -> None:
         """Query schema to populate object class cache."""
         if not self._config_nc_accessible:
+            # Do NOT include GMSA/SMSA here. When the schema NC is inaccessible,
+            # claiming support for these classes causes get_users() to build a
+            # complex OR filter and get_computers() to build NOT filters.  Those
+            # operators fail silently on child-domain DCs whose ADWS cannot reach
+            # the forest-root schema NC, returning 0 objects instead of an error.
             self._schema_classes = {
                 'user', 'group', 'computer', 'organizationalUnit', 'container',
                 'groupPolicyContainer', 'trustedDomain', 'domain',
-                'msDS-GroupManagedServiceAccount', 'msDS-ManagedServiceAccount'
             }
             return
 
