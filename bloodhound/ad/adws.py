@@ -376,9 +376,17 @@ class ADWSClient:
                             )
                         break
                 batch_num += 1
+                batch_count = 0
                 for entry in self._parse_xml_entries(batch_et):
                     total_yielded += 1
+                    batch_count += 1
                     yield entry
+                logging.debug('ADWS search %r batch %d: %d objects (total %d)',
+                              search_filter, batch_num, batch_count, total_yielded)
+
+            if total_yielded == 0 and batch_num > 0:
+                logging.warning('ADWS search %r completed with 0 results after %d batch(es)',
+                                search_filter, batch_num)
 
         except Exception as e:
             logging.warning('ADWS search %r failed: %s', search_filter, e)
