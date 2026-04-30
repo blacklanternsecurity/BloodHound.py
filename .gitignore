@@ -5,3 +5,8 @@ dist/
 *.csv
 *.json
 *.zip
+
+# Ignore ccache and local files
+*.ccache
+Pipfile
+Pipfile.lock

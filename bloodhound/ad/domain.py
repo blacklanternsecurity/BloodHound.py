@@ -41,22 +41,63 @@ from bloodhound.enumeration.objectresolver import ObjectResolver
 Active Directory Domain Controller
 """
 class ADDC(ADComputer):
-    def __init__(self, hostname=None, ad=None):
+    def __init__(self, hostname=None, ad=None, use_adws=False):
         ADComputer.__init__(self, hostname)
         self.ad = ad
+        self.use_adws = use_adws
         # Primary LDAP connection
         self.ldap = None
         # Secondary LDAP connection
         self.resolverldap = None
         # GC LDAP connection
         self.gcldap = None
+        # ADWS client (when use_adws=True)
+        self._adws_client = None
         # Initialize GUID map
         self.objecttype_guid_map = dict()
 
+    def adws_connect(self):
+        """
+        Connect to the ADWS service on port 9389.
+
+        Idempotent: returns immediately if a client is already established. This
+        avoids re-initiating Kerberos TGS requests on every DN resolution call
+        routed through ldap_connect(resolver=True), which previously caused
+        KRB-ERROR responses and crashed enumeration mid-run.
+        """
+        from bloodhound.ad.adws import ADWSClient
+
+        # Reuse the existing connection if present
+        if self._adws_client is not None:
+            return True
+
+        logging.info('Connecting to ADWS at %s:9389', self.hostname)
+
+        # Resolve hostname to IP
+        ip = None
+        try:
+            q = self.ad.dnsresolver.resolve(self.hostname, 'A', tcp=self.ad.dns_tcp)
+            for rdata in q:
+                ip = rdata.address
+                logging.debug('Resolved %s to %s', self.hostname, ip)
+                break
+        except:
+            pass
+
+        # Pass FQDN as hostname (needed for Kerberos SPN), resolved IP for TCP
+        self._adws_client = ADWSClient(self.hostname, self.ad, target_ip=ip)
+        self._adws_client.connect()
+        logging.info('Successfully connected to ADWS')
+        return True
+
     def ldap_connect(self, protocol=None, resolver=False):
         """
-        Connect to the LDAP service
+        Connect to the LDAP service (or ADWS if use_adws is enabled)
         """
+        # Route to ADWS if enabled
+        if self.use_adws:
+            return self.adws_connect()
+
         if not protocol:
             protocol = self.ad.ldap_default_protocol
 
@@ -121,8 +162,15 @@ class ADDC(ADComputer):
 
     def gc_connect(self, protocol='ldap'):
         """
-        Connect to the global catalog
+        Connect to the global catalog (or use ADWS connection if enabled)
         """
+        # In ADWS mode, we use the same connection for cross-domain queries
+        if self.use_adws:
+            logging.debug('ADWS mode: GC queries will use same ADWS connection')
+            if self._adws_client is None:
+                return self.adws_connect()
+            return True
+
         if self.hostname in self.ad.gcs():
             # This server is a Global Catalog
             initial_server = self.hostname
@@ -134,6 +182,8 @@ class ADDC(ADComputer):
                 logging.error('Could not find a Global Catalog in this domain!'\
                               ' Resolving will be unreliable in forests with multiple domains')
                 return False
+        
+        ip = None
         try:
             # Convert the hostname to an IP, this prevents ldap3 from doing it
             # which doesn't use our custom nameservers
@@ -141,7 +191,9 @@ class ADDC(ADComputer):
             q = self.ad.dnsresolver.query(initial_server, tcp=self.ad.dns_tcp)
             for r in q:
                 ip = r.address
-        except (resolver.NXDOMAIN, resolver.Timeout):
+                break
+        except (resolver.NXDOMAIN, resolver.Timeout) as e:
+            logging.warning('Failed to resolve GC server %s: %s', initial_server, str(e))
             for server in self.ad.gcs():
                 # Skip the one we already tried
                 if server == initial_server:
@@ -154,17 +206,72 @@ class ADDC(ADComputer):
                     for r in q:
                         ip = r.address
                         break
-                except (resolver.NXDOMAIN, resolver.Timeout):
+                    if ip:
+                        initial_server = server
+                        break
+                except (resolver.NXDOMAIN, resolver.Timeout) as e:
+                    logging.warning('Failed to resolve alternative GC server %s: %s', server, str(e))
                     continue
-
-        self.gcldap = self.ad.auth.getLDAPConnection(hostname=self.hostname, ip=ip, gc=True,
-                                                     baseDN=self.ad.baseDN, protocol=protocol)
-        return self.gcldap is not None
+        
+        if ip is None:
+            logging.error('Failed to resolve any GC server to an IP address')
+            return False
+        
+        try:
+            self.gcldap = self.ad.auth.getLDAPConnection(hostname=self.hostname, ip=ip, gc=True,
+                                                         baseDN=self.ad.baseDN, protocol=protocol)
+            success = self.gcldap is not None
+            if not success:
+                logging.error('Failed to establish GC LDAP connection')
+            return success
+        except Exception as e:
+            logging.error('Exception during GC LDAP connection: %s', str(e))
+            return False
 
     def search(self, search_filter='(objectClass=*)',attributes=None, search_base=None, generator=True, use_gc=False, use_resolver=False, query_sd=False, is_retry=False,  search_scope=SUBTREE,):
         """
-        Search for objects in LDAP or Global Catalog LDAP.
+        Search for objects in LDAP or Global Catalog LDAP (or ADWS if enabled).
         """
+        # Route to ADWS if enabled
+        if self.use_adws:
+            if self._adws_client is None:
+                self.adws_connect()
+
+            if not search_base:  # Handle None and empty string
+                search_base = self.ad.baseDN
+
+            # ADWS has no ALL_ATTRIBUTES equivalent. When a caller passes an
+            # empty list (relying on LDAP's ALL_ATTRIBUTES behavior), substitute
+            # a broad default covering the common fields enumeration code
+            # reads. Don't shrink it to the bare identity trio or attributes
+            # like gPLink on the domain object get silently dropped.
+            if attributes is None or attributes == []:
+                attr_list = [
+                    'distinguishedName', 'objectSid', 'objectClass', 'objectGUID',
+                    'sAMAccountName', 'sAMAccountType', 'name', 'description',
+                    'whenCreated', 'whenChanged', 'displayName',
+                    'gPLink', 'gPOptions', 'nETBIOSName', 'nCName',
+                    'msDS-Behavior-Version', 'ms-DS-MachineAccountQuota',
+                ]
+            elif isinstance(attributes, str):
+                attr_list = [attributes]
+            else:
+                attr_list = list(attributes)
+
+            # Use ADWS client search
+            # ldap3 search_scope constants are strings ('BASE', 'LEVEL', 'SUBTREE');
+            # the ADWS shim maps them to the dialect's scope names.
+            for entry in self._adws_client.search(
+                search_filter=search_filter,
+                attributes=attr_list,
+                search_base=search_base,
+                query_sd=query_sd,
+                search_scope=search_scope,
+            ):
+                yield entry
+            return
+
+        # Standard LDAP path
         if self.ldap is None and not use_resolver:
             self.ldap_connect(resolver=use_resolver)
         if self.resolverldap is None and use_resolver:
@@ -238,6 +345,13 @@ class ADDC(ADComputer):
         This function supports searching both in the local directory and the Global Catalog.
         The connection to the GC should already be established before calling this function.
         """
+        # Route to ADWS if enabled
+        if self.use_adws:
+            if self._adws_client is None:
+                self.adws_connect()
+            return self._adws_client.get_single(qobject, attributes)
+
+        # Standard LDAP path
         if use_gc:
             searcher = self.gcldap
         else:
@@ -286,9 +400,14 @@ class ADDC(ADComputer):
 
     def get_netbios_name(self, context):
         try:
+            # Use ADWS configuration naming context if in ADWS mode
+            if self.use_adws:
+                search_base = "CN=Partitions,%s" % self._adws_client.configuration_naming_context
+            else:
+                search_base = "CN=Partitions,%s" % self.ldap.server.info.other['configurationNamingContext'][0]
             entries = self.search('(ncname=%s)' % context,
                                   ['nETBIOSName'],
-                                  search_base="CN=Partitions,%s" % self.ldap.server.info.other['configurationNamingContext'][0])
+                                  search_base=search_base)
         except (LDAPAttributeError, LDAPCursorError) as e:
             logging.warning('Could not determine NetBiosname of the domain: %s', str(e))
         return next(entries)
@@ -299,16 +418,39 @@ class ADDC(ADComputer):
         """
         self.objecttype_guid_map = dict()
 
-        if self.ldap is None:
-            self.ldap_connect()
+        # Route to ADWS if enabled
+        if self.use_adws:
+            if self._adws_client is None:
+                self.adws_connect()
 
-        sresult = self.ldap.extend.standard.paged_search(self.ldap.server.info.other['schemaNamingContext'][0],
-                                                         '(objectClass=*)',
-                                                         attributes=['name', 'schemaidguid'])
-        for res in sresult:
-            if res['attributes']['schemaIDGUID']:
-                guid = str(UUID(bytes_le=res['attributes']['schemaIDGUID']))
-                self.objecttype_guid_map[res['attributes']['name'].lower()] = guid
+            schema_base = self._adws_client.schema_naming_context
+            sresult = self._adws_client.search(
+                search_filter='(objectClass=*)',
+                attributes=['name', 'schemaIDGUID'],
+                search_base=schema_base
+            )
+            for res in sresult:
+                schema_guid = res['attributes'].get('schemaIDGUID')
+                name = res['attributes'].get('name')
+                if schema_guid and name:
+                    # Handle GUID - may be bytes or string depending on conversion
+                    if isinstance(schema_guid, bytes):
+                        guid = str(UUID(bytes_le=schema_guid))
+                    else:
+                        guid = str(schema_guid)
+                    self.objecttype_guid_map[name.lower()] = guid
+        else:
+            # Standard LDAP path
+            if self.ldap is None:
+                self.ldap_connect()
+
+            sresult = self.ldap.extend.standard.paged_search(self.ldap.server.info.other['schemaNamingContext'][0],
+                                                             '(objectClass=*)',
+                                                             attributes=['name', 'schemaidguid'])
+            for res in sresult:
+                if res['attributes']['schemaIDGUID']:
+                    guid = str(UUID(bytes_le=res['attributes']['schemaIDGUID']))
+                    self.objecttype_guid_map[res['attributes']['name'].lower()] = guid
 
         if 'ms-mcs-admpwdexpirationtime' in self.objecttype_guid_map:
             logging.debug('Found LAPS attributes in schema')
@@ -351,10 +493,13 @@ class ADDC(ADComputer):
         if entriesNum == 0:
             # Raise exception if we somehow managed to authenticate but the domain is wrong
             # prevents confusing exceptions later
-            actualdn = self.ldap.server.info.other['defaultNamingContext'][0]
+            if self.use_adws:
+                actualdn = self.ad.baseDN
+            else:
+                actualdn = self.ldap.server.info.other['defaultNamingContext'][0]
             actualdomain = ADUtils.ldap2domain(actualdn)
-            logging.error('Could not find the requested domain %s on this DC, LDAP server reports is domain as %s (you may want to try that?)', self.ad.domain, actualdomain)
-            raise CollectionException("Specified domain was not found in LDAP")
+            logging.error('Could not find the requested domain %s on this DC, server reports domain as %s (you may want to try that?)', self.ad.domain, actualdomain)
+            raise CollectionException("Specified domain was not found")
 
         logging.info('Found %u domains', entriesNum)
 
@@ -368,9 +513,13 @@ class ADDC(ADComputer):
         This searches the configuration, which is present only once in the forest but is replicated
         to every DC.
         """
+        if self.use_adws:
+            config_nc = self._adws_client.configuration_naming_context
+        else:
+            config_nc = self.ldap.server.info.other['configurationNamingContext'][0]
         entries = self.search('(objectClass=crossRef)',
                               ['nETBIOSName', 'systemFlags', 'nCName', 'name'],
-                              search_base="CN=Partitions,%s" % self.ldap.server.info.other['configurationNamingContext'][0],
+                              search_base="CN=Partitions,%s" % config_nc,
                               generator=True)
 
         entriesNum = 0
@@ -379,7 +528,11 @@ class ADDC(ADComputer):
             if not entry['attributes']['systemFlags']:
                 continue
             # This is a naming context, but not a domain
-            if not entry['attributes']['systemFlags'] & 2:
+            # Convert to int if string (ADWS returns strings, LDAP returns ints)
+            system_flags = entry['attributes']['systemFlags']
+            if isinstance(system_flags, str):
+                system_flags = int(system_flags)
+            if not system_flags & 2:
                 continue
             entry['attributes']['distinguishedName'] = entry['attributes']['nCName']
             entriesNum += 1
@@ -489,13 +642,20 @@ class ADDC(ADComputer):
             properties.append('nTSecurityDescriptor')
 
         # Query for MSA only if server supports it
-        if 'msDS-GroupManagedServiceAccount' in self.ldap.server.schema.object_classes:
+        if self.use_adws:
+            has_gmsa = self._adws_client.supports_object_class('msDS-GroupManagedServiceAccount')
+            has_smsa = self._adws_client.supports_object_class('msDS-ManagedServiceAccount')
+        else:
+            has_gmsa = 'msDS-GroupManagedServiceAccount' in self.ldap.server.schema.object_classes
+            has_smsa = 'msDS-ManagedServiceAccount' in self.ldap.server.schema.object_classes
+
+        if has_gmsa:
             gmsa_filter = '(objectClass=msDS-GroupManagedServiceAccount)'
         else:
             logging.debug('No support for GMSA, skipping in query')
             gmsa_filter = ''
 
-        if 'msDS-ManagedServiceAccount' in self.ldap.server.schema.object_classes:
+        if has_smsa:
             smsa_filter = '(objectClass=msDS-ManagedServiceAccount)'
         else:
             logging.debug('No support for SMSA, skipping in query')
@@ -540,12 +700,19 @@ class ADDC(ADComputer):
             properties.append('nTSecurityDescriptor')
 
         # Exclude MSA only if server supports it
-        if 'msDS-GroupManagedServiceAccount' in self.ldap.server.schema.object_classes:
+        if self.use_adws:
+            has_gmsa = self._adws_client.supports_object_class('msDS-GroupManagedServiceAccount')
+            has_smsa = self._adws_client.supports_object_class('msDS-ManagedServiceAccount')
+        else:
+            has_gmsa = 'msDS-GroupManagedServiceAccount' in self.ldap.server.schema.object_classes
+            has_smsa = 'msDS-ManagedServiceAccount' in self.ldap.server.schema.object_classes
+
+        if has_gmsa:
             gmsa_filter = '(!(objectClass=msDS-GroupManagedServiceAccount))'
         else:
             gmsa_filter = ''
 
-        if 'msDS-ManagedServiceAccount' in self.ldap.server.schema.object_classes:
+        if has_smsa:
             smsa_filter = '(!(objectClass=msDS-ManagedServiceAccount))'
         else:
             smsa_filter = ''
@@ -624,7 +791,11 @@ class ADDC(ADComputer):
             self.get_computers_withcache(include_properties=props, acl=acls)
 
     def get_root_domain(self):
-        return ADUtils.ldap2domain(self.ldap.server.info.other['configurationNamingContext'][0])
+        if self.use_adws:
+            config_nc = self._adws_client.configuration_naming_context
+        else:
+            config_nc = self.ldap.server.info.other['configurationNamingContext'][0]
+        return ADUtils.ldap2domain(config_nc)
 
 
 """
@@ -632,8 +803,9 @@ Active Directory data and cache
 """
 class AD(object):
 
-    def __init__(self, domain=None, auth=None, nameserver=None, dns_tcp=False, dns_timeout=3.0, use_ldaps=False):
+    def __init__(self, domain=None, auth=None, nameserver=None, dns_tcp=False, dns_timeout=3.0, use_ldaps=False, use_adws=False):
         self.domain = domain
+        self.use_adws = use_adws
         # Object of type ADDomain, added later
         self.domain_object = None
         self.auth = auth

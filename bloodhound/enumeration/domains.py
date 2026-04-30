@@ -89,14 +89,17 @@ class DomainEnumerator(object):
             "meta": {
                 "type": "domains",
                 "count": 0,
-                "version":5
+                "version":6
             }
         }
         # Get functional level
         level_id = ADUtils.get_entry_property(domain_object, 'msds-behavior-version')
         try:
-            functional_level = ADUtils.FUNCTIONAL_LEVELS[int(level_id)]
-        except KeyError:
+            if level_id is None:
+                functional_level = 'Unknown'
+            else:
+                functional_level = ADUtils.FUNCTIONAL_LEVELS[int(level_id)]
+        except (KeyError, ValueError, TypeError):
             functional_level = 'Unknown'
 
         whencreated = ADUtils.get_entry_property(domain_object, 'whencreated', default=0)
@@ -112,6 +115,8 @@ class DomainEnumerator(object):
                 "description": ADUtils.get_entry_property(domain_object, 'description', ''),
                 "functionallevel": functional_level,
                 "highvalue": True,
+                "isaclprotected": False,
+                "collected": True,
                 'whencreated': whencreated
             },
             "Trusts": [],
