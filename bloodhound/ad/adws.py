@@ -345,12 +345,15 @@ class ADWSClient:
         adws_scope = self._SCOPE_MAP.get(str(search_scope).upper(), 'Subtree')
 
         try:
-            # enumerate_batches() yields one XML batch (≤256 objects) per Pull
-            # response.  The lock is held only for each individual Enumerate or
-            # Pull round-trip so other threads (e.g. the ACL pool callback) can
-            # interleave their own requests between batches.  Results are yielded
-            # to the caller as each batch arrives rather than after the full
-            # result set is buffered in memory.
+            # Hold the lock for the entire Enumerate+Pull sequence of a single query.
+            # Releasing between batches allows ACL callback threads to interleave ADWS
+            # SID-resolution requests, but the inter-batch delay this causes can exceed
+            # the server's enumeration-context lifetime, resulting in "Invalid
+            # Enumeration Context" errors mid-query.  Holding the lock throughout keeps
+            # pulls fast enough that the context stays alive.  ACL callbacks still run —
+            # they just queue up and execute once this query completes.  The lock is
+            # released across `yield` suspension points, so it is not held while the
+            # caller processes each entry.
             batch_gen = self._client.enumerate_batches(
                 query=search_filter,
                 attributes=attr_list,
@@ -360,8 +363,8 @@ class ADWSClient:
             )
             batch_num = 0
             total_yielded = 0
-            while True:
-                with self._io_lock:
+            with self._io_lock:
+                while True:
                     try:
                         batch_et = next(batch_gen)
                     except StopIteration:
@@ -375,14 +378,14 @@ class ADWSClient:
                                 search_filter, total_yielded, batch_num, e,
                             )
                         break
-                batch_num += 1
-                batch_count = 0
-                for entry in self._parse_xml_entries(batch_et):
-                    total_yielded += 1
-                    batch_count += 1
-                    yield entry
-                logging.debug('ADWS search %r batch %d: %d objects (total %d)',
-                              search_filter, batch_num, batch_count, total_yielded)
+                    batch_num += 1
+                    batch_count = 0
+                    for entry in self._parse_xml_entries(batch_et):
+                        total_yielded += 1
+                        batch_count += 1
+                        yield entry
+                    logging.debug('ADWS search %r batch %d: %d objects (total %d)',
+                                  search_filter, batch_num, batch_count, total_yielded)
 
             if total_yielded == 0 and batch_num > 0:
                 logging.warning('ADWS search %r completed with 0 results after %d batch(es)',
