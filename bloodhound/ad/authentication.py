@@ -23,6 +23,7 @@
 ####################
 
 import logging
+import socket
 import ssl
 import os
 import traceback
@@ -78,12 +79,28 @@ class ADAuthentication(object):
     def set_aeskey(self, aeskey):
         self.aeskey = aeskey
 
+    @staticmethod
+    def _resolve_host(hostname):
+        """Resolve a hostname to an IP via system resolver (/etc/hosts, OS DNS)."""
+        try:
+            results = socket.getaddrinfo(hostname, None)
+            for family, _, _, _, sockaddr in results:
+                if family in (socket.AF_INET, socket.AF_INET6):
+                    logging.debug('Resolved %s to %s via system resolver', hostname, sockaddr[0])
+                    return sockaddr[0]
+        except socket.gaierror:
+            pass
+        return hostname
+
     def set_kdc(self, kdc):
-        # Set KDC
-        self.kdc = kdc
+        # Set KDC — resolve to IP so impacket doesn't need DNS through the proxy
+        resolved = self._resolve_host(kdc)
+        if resolved != kdc:
+            logging.debug('KDC %s resolved to %s', kdc, resolved)
+        self.kdc = resolved
         if self.userdomain == self.domain:
             # Also set it for user domain if this is equal
-            self.userdomain_kdc = kdc
+            self.userdomain_kdc = resolved
 
     def getLDAPConnection(self, hostname='', ip='', baseDN='', protocol='ldaps', gc=False):
         if gc:

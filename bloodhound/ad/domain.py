@@ -982,7 +982,7 @@ class AD(object):
                 logging.debug('Found KDC for enumeration domain: %s' % str(r.target).rstrip('.'))
                 if kdc not in self._kdcs:
                     self._kdcs.append(kdc)
-                    self.auth.kdc = self._kdcs[0]
+                    self.auth.kdc = self.auth._resolve_host(self._kdcs[0])
         except resolver.NXDOMAIN:
             pass
 
@@ -1000,7 +1000,7 @@ class AD(object):
             for r in q:
                 kdc = str(r.target).rstrip('.')
                 logging.debug('Found KDC for user: %s' % str(r.target).rstrip('.'))
-                self.auth.userdomain_kdc = kdc
+                self.auth.userdomain_kdc = self.auth._resolve_host(kdc)
         else:
             self.auth.userdomain_kdc = self.auth.kdc
 
