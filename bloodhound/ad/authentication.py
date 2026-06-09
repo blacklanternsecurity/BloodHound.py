@@ -23,7 +23,6 @@
 ####################
 
 import logging
-import socket
 import ssl
 import os
 import traceback
@@ -81,15 +80,25 @@ class ADAuthentication(object):
 
     @staticmethod
     def _resolve_host(hostname):
-        """Resolve a hostname to an IP via system resolver (/etc/hosts, OS DNS)."""
+        """Resolve a hostname to an IP by reading /etc/hosts directly.
+
+        Bypasses socket.getaddrinfo() which proxychains intercepts."""
         try:
-            results = socket.getaddrinfo(hostname, None)
-            for family, _, _, _, sockaddr in results:
-                if family in (socket.AF_INET, socket.AF_INET6):
-                    logging.debug('Resolved %s to %s via system resolver', hostname, sockaddr[0])
-                    return sockaddr[0]
-        except socket.gaierror:
-            pass
+            with open('/etc/hosts', 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+                    ip_addr = parts[0]
+                    hostnames = [h.lower() for h in parts[1:]]
+                    if hostname.lower() in hostnames:
+                        logging.debug('Resolved %s to %s via /etc/hosts', hostname, ip_addr)
+                        return ip_addr
+        except (IOError, OSError):
+            logging.debug('Could not read /etc/hosts')
         return hostname
 
     def set_kdc(self, kdc):

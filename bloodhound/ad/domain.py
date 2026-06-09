@@ -22,7 +22,6 @@
 #
 ####################
 import logging
-import socket
 import traceback
 import codecs
 import json
@@ -150,20 +149,10 @@ class ADDC(ADComputer):
             logging.debug('No AAAA records found')
 
         if not ip:
-            logging.debug('DNS resolution failed, falling back to system resolver (/etc/hosts)')
-            try:
-                results = socket.getaddrinfo(self.hostname, None)
-                for family, _, _, _, sockaddr in results:
-                    addr = sockaddr[0]
-                    logging.debug('System resolver returned: %s (family=%s)', addr, family)
-                    if family == socket.AF_INET:
-                        ip = addr
-                        break
-                    elif family == socket.AF_INET6:
-                        ip = f'[{addr}]'
-                        break
-            except socket.gaierror:
-                logging.debug('System resolver also failed for %s', self.hostname)
+            logging.debug('DNS resolution failed, falling back to /etc/hosts')
+            resolved = self.ad.auth._resolve_host(self.hostname)
+            if resolved != self.hostname:
+                ip = resolved
 
         if not ip:
             logging.error('Failed to resolve LDAP server IP')
