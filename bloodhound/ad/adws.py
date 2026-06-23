@@ -149,6 +149,11 @@ class ADWSClient:
         Raises:
             CollectionException: If connection fails
         """
+        self._create_connection()
+        self._resolve_base_dn()
+
+    def _create_connection(self) -> None:
+        """Establish the underlying ADWS TCP/NMF connection."""
         auth = self.ad.auth
 
         # Prefer Kerberos if TGT is available
@@ -176,10 +181,34 @@ class ADWSClient:
             )
             logging.debug('Successfully connected to ADWS')
         except Exception as e:
+            self._client = None
             logging.error('ADWS connection failed: %s', str(e))
             raise CollectionException(f'ADWS connection failed: {e}. No LDAP fallback in ADWS mode.')
 
-        self._resolve_base_dn()
+    def _reconnect(self) -> bool:
+        """Attempt to re-establish a dropped ADWS connection."""
+        self._client = None
+        try:
+            logging.info('ADWS connection lost, reconnecting...')
+            self._create_connection()
+            logging.info('ADWS reconnected successfully')
+            return True
+        except Exception as e:
+            logging.warning('ADWS reconnection failed: %s', e)
+            return False
+
+    @staticmethod
+    def _is_transient_error(exc: Exception) -> bool:
+        """Check if an ADWS error is a transient connection failure."""
+        msg = str(exc).lower()
+        return any(s in msg for s in (
+            'noconnectionavailable',
+            'no connection',
+            'connection reset',
+            'connection refused',
+            'broken pipe',
+            'timed out',
+        ))
 
     def _resolve_base_dn(self) -> None:
         """Resolve the correct base DN and configuration partition DN.
@@ -357,25 +386,25 @@ class ADWSClient:
 
         adws_scope = self._SCOPE_MAP.get(str(search_scope).upper(), 'Subtree')
 
-        try:
-            # Hold the lock only for the SOAP request/response. pull() completes
-            # its enumerate/pull loop before returning, so the lock does not span
-            # generator yields, which keeps consumers free to recurse back into
-            # search() without deadlocking.
-            with self._io_lock:
-                results_xml = self._client.pull(
-                    query=search_filter,
-                    attributes=attr_list,
-                    search_base=search_base,
-                    scope=adws_scope,
-                    query_sd=query_sd,
-                )
+        for attempt in range(2):
+            try:
+                with self._io_lock:
+                    results_xml = self._client.pull(
+                        query=search_filter,
+                        attributes=attr_list,
+                        search_base=search_base,
+                        scope=adws_scope,
+                        query_sd=query_sd,
+                    )
 
-            for entry in self._parse_xml_entries(results_xml):
-                yield entry
+                for entry in self._parse_xml_entries(results_xml):
+                    yield entry
+                return
 
-        except Exception as e:
-            logging.warning('ADWS search %r failed: %s', search_filter, e)
+            except Exception as e:
+                if attempt == 0 and self._is_transient_error(e) and self._reconnect():
+                    continue
+                logging.warning('ADWS search %r failed: %s', search_filter, e)
 
     def get_single(
         self,
@@ -401,23 +430,24 @@ class ADWSClient:
         else:
             attr_list = list(attributes)
 
-        try:
-            # Use the DN as the search base with a simple filter.
-            # See search() for the rationale on the I/O lock.
-            with self._io_lock:
-                results_xml = self._client.pull(
-                    query="(objectClass=*)",
-                    attributes=attr_list,
-                    search_base=dn,
-                )
+        for attempt in range(2):
+            try:
+                with self._io_lock:
+                    results_xml = self._client.pull(
+                        query="(objectClass=*)",
+                        attributes=attr_list,
+                        search_base=dn,
+                    )
 
-            entries = list(self._parse_xml_entries(results_xml))
-            if entries:
-                return entries[0]
-            return None
+                entries = list(self._parse_xml_entries(results_xml))
+                if entries:
+                    return entries[0]
+                return None
 
-        except Exception as e:
-            logging.warning('ADWS get_single %r failed: %s', dn, e)
+            except Exception as e:
+                if attempt == 0 and self._is_transient_error(e) and self._reconnect():
+                    continue
+                logging.warning('ADWS get_single %r failed: %s', dn, e)
             return None
 
     def _parse_xml_entries(self, xml_root: ElementTree.Element) -> Generator[Dict[str, Any], None, None]:
