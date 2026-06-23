@@ -67,13 +67,14 @@ class ADAuthentication(object):
         self.aeskey = aeskey
         # KDC for domain we query
         self.kdc = kdc
-        # KDC for domain of the user - fill with domain first, will be resolved later
-        self.userdomain_kdc = self.domain
+        # KDC for domain of the user
+        self.userdomain_kdc = self.userdomain
         self.auth_method = auth_method
         self.ldap_channel_binding = ldap_channel_binding
 
         # Kerberos
         self.tgt = None
+        self.ldap_tgs = None
 
     def set_aeskey(self, aeskey):
         self.aeskey = aeskey
@@ -187,8 +188,16 @@ class ADAuthentication(object):
 
         username = Principal(self.username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
         servername = Principal('ldap/%s' % hostname, type=constants.PrincipalNameType.NT_SRV_INST.value)
-        tgs, cipher, _, sessionkey = getKerberosTGS(servername, self.domain, self.kdc,
-                                                                self.tgt['KDC_REP'], self.tgt['cipher'], self.tgt['sessionKey'])
+
+        # If we already have a cached service ticket (loaded from ccache), use it directly
+        if self.ldap_tgs is not None:
+            logging.debug('Using pre-loaded LDAP service ticket from ccache')
+            tgs = self.ldap_tgs['KDC_REP']
+            cipher = self.ldap_tgs['cipher']
+            sessionkey = self.ldap_tgs['sessionKey']
+        else:
+            tgs, cipher, _, sessionkey = getKerberosTGS(servername, self.domain, self.kdc,
+                                                                    self.tgt['KDC_REP'], self.tgt['cipher'], self.tgt['sessionKey'])
 
         # Let's build a NegTokenInit with a Kerberos AP_REQ
         blob = SPNEGO_NegTokenInit()
@@ -212,7 +221,7 @@ class ADAuthentication(object):
 
         authenticator = Authenticator()
         authenticator['authenticator-vno'] = 5
-        authenticator['crealm'] = self.userdomain
+        authenticator['crealm'] = self.userdomain.upper()
         seq_set(authenticator, 'cname', username.components_to_asn1)
         now = datetime.datetime.utcnow()
 
@@ -391,28 +400,60 @@ class ADAuthentication(object):
 
         # Load TGT for our domain
         ccache = CCache.loadFile(krb5cc)
+        # Try exact match first (same-realm TGT)
         principal = 'krbtgt/%s@%s' % (self.domain.upper(), self.domain.upper())
         creds = ccache.getCredential(principal, anySPN=False)
+        if creds is None:
+            # Try cross-realm TGT (krbtgt/DOMAIN@ISSUING_REALM)
+            for c in ccache.credentials:
+                sname = c['server'].prettyPrint().decode()
+                if sname.upper().startswith('KRBTGT/%s@' % self.domain.upper()):
+                    logging.debug('Found cross-realm TGT: %s', sname)
+                    creds = c
+                    break
+        if creds is None:
+            # Try any krbtgt ticket (for user's home realm)
+            for c in ccache.credentials:
+                sname = c['server'].prettyPrint().decode()
+                if 'KRBTGT/' in sname.upper():
+                    logging.debug('Found TGT: %s', sname)
+                    creds = c
+                    break
+        # Also look for an LDAP service ticket in the ccache
+        for c in ccache.credentials:
+            sname = c['server'].prettyPrint().decode()
+            if sname.upper().startswith('LDAP/'):
+                logging.info('Found LDAP service ticket in cache: %s', sname)
+                self.ldap_tgs = c.toTGS()
+                break
+
         if creds is not None:
             TGT = creds.toTGT()
-            # This we store for later
             self.tgt = TGT
             tgt, cipher, session_key = TGT['KDC_REP'], TGT['cipher'], TGT['sessionKey']
             logging.info('Using TGT from cache')
+        elif self.ldap_tgs is not None:
+            logging.info('No TGT found but have LDAP service ticket — using it directly')
+            self.tgt = {'KDC_REP': None, 'cipher': None, 'sessionKey': None}
+            return True
         else:
-            logging.debug("No valid credentials found in cache. ")
+            logging.debug("No valid credentials found in cache.")
             return False
 
-        # Verify if this ticket is actually for the specified user
+        # Verify the ticket is for the specified user
         ticket = Ticket()
-        decoded_tgt = decoder.decode(tgt, asn1Spec = AS_REP())[0]
+        try:
+            decoded_tgt = decoder.decode(tgt, asn1Spec = TGS_REP())[0]
+        except Exception:
+            decoded_tgt = decoder.decode(tgt, asn1Spec = AS_REP())[0]
         ticket.from_asn1(decoded_tgt['ticket'])
 
         tgt_principal = Principal()
         tgt_principal.from_asn1(decoded_tgt, 'crealm', 'cname')
-        expected_principal = '%s@%s' % (self.username.lower(), self.domain.upper())
-        if expected_principal.upper() != str(tgt_principal).upper():
-            logging.warning('Username in ccache file does not match supplied username! %s != %s', tgt_principal, expected_principal)
+        # Accept tickets from any realm for the specified user
+        tgt_user = str(tgt_principal).split('@')[0]
+        if tgt_user.upper() != self.username.upper():
+            logging.warning('Username in ccache file does not match supplied username! %s != %s', tgt_principal, self.username)
             return False
         else:
             logging.info('Found TGT with correct principal in ccache file.')
