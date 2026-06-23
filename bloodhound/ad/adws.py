@@ -7,6 +7,7 @@ enumeration code.
 """
 
 import logging
+import re
 import threading
 from base64 import b64decode
 from datetime import datetime
@@ -134,6 +135,7 @@ class ADWSClient:
         self.ad = ad
         self._client: Optional[ADWSConnect] = None
         self._schema_classes: Optional[set] = None
+        self._configuration_dn: Optional[str] = None
         # Serializes SOAP request/response cycles on the single shared TCP/NMF
         # stream. Without this, the main enumeration thread and the ACL
         # callback thread (from the multiprocessing pool's result callback)
@@ -177,15 +179,93 @@ class ADWSClient:
             logging.error('ADWS connection failed: %s', str(e))
             raise CollectionException(f'ADWS connection failed: {e}. No LDAP fallback in ADWS mode.')
 
+        self._resolve_base_dn()
+
+    def _resolve_base_dn(self) -> None:
+        """Resolve the correct base DN and configuration partition DN.
+
+        ADWS is case-sensitive about distinguished names unlike LDAP. The
+        base DN we construct from DNS is lowercased, but the server may
+        store it with mixed case. A probe search lets the server tell us
+        the real DN — either via a successful result or via MatchedDN in
+        the SOAP fault.
+
+        The Configuration partition lives at the forest root, not the
+        domain root, so for child domains we also need to discover the
+        real configuration DN rather than assuming it's under our baseDN.
+        """
+        self.ad.baseDN = self._probe_dn(self.ad.baseDN)
+        self._resolve_configuration_dn()
+
+    def _probe_dn(self, dn: str) -> str:
+        """Search for a DN and return the server's correctly-cased version."""
+        try:
+            with self._io_lock:
+                results_xml = self._client.pull(
+                    query="(objectClass=*)",
+                    attributes=["distinguishedName"],
+                    search_base=dn,
+                    scope="Base",
+                )
+            for entry in self._parse_xml_entries(results_xml):
+                result_dn = entry.get('dn') or entry.get('attributes', {}).get('distinguishedName')
+                if result_dn:
+                    if isinstance(result_dn, list):
+                        result_dn = result_dn[0]
+                    if result_dn != dn:
+                        logging.debug('Corrected DN casing: %s -> %s', dn, result_dn)
+                    return result_dn
+                break
+        except Exception as e:
+            error_str = str(e)
+            match = re.search(r'<\w+:MatchedDN>([^<]+)</\w+:MatchedDN>', error_str)
+            if match:
+                matched_dn = match.group(1)
+                if matched_dn.upper() == dn.upper():
+                    logging.debug('Corrected DN casing from MatchedDN: %s -> %s', dn, matched_dn)
+                    return matched_dn
+            logging.debug('Could not resolve DN casing for %s: %s', dn, e)
+        return dn
+
+    def _resolve_configuration_dn(self) -> None:
+        """Discover the Configuration partition DN.
+
+        In a child domain the Configuration partition is at the forest
+        root (e.g. CN=Configuration,DC=Forest,DC=com), not under the
+        child domain DN. We walk up the DC components until we find a
+        Configuration container that exists.
+        """
+        dc_parts = [p for p in self.ad.baseDN.split(',') if p.upper().startswith('DC=')]
+        for i in range(len(dc_parts)):
+            candidate_root = ','.join(dc_parts[i:])
+            candidate = f"CN=Configuration,{candidate_root}"
+            try:
+                with self._io_lock:
+                    self._client.pull(
+                        query="(objectClass=*)",
+                        attributes=["distinguishedName"],
+                        search_base=candidate,
+                        scope="Base",
+                    )
+                self._configuration_dn = candidate
+                if i > 0:
+                    logging.debug('Found Configuration partition at forest root: %s', candidate)
+                return
+            except Exception:
+                continue
+        logging.debug('Could not discover Configuration partition, using default')
+
     @property
     def configuration_naming_context(self) -> str:
         """Return configuration partition base DN."""
+        if self._configuration_dn:
+            return self._configuration_dn
         return f"CN=Configuration,{self.ad.baseDN}"
 
     @property
     def schema_naming_context(self) -> str:
         """Return schema partition base DN."""
-        return f"CN=Schema,CN=Configuration,{self.ad.baseDN}"
+        return f"CN=Schema,{self.configuration_naming_context}"
 
     def supports_object_class(self, class_name: str) -> bool:
         """
