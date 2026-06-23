@@ -104,7 +104,7 @@ class MembershipEnumerator(object):
         props['admincount'] = ADUtils.get_entry_property(entry, 'adminCount', 0) == 1
         if len(ADUtils.get_entry_property(entry, 'msDS-AllowedToDelegateTo', [])) > 0:
             props['allowedtodelegate'] = ADUtils.get_entry_property(entry, 'msDS-AllowedToDelegateTo', [])
-        props['sidhistory'] = [LDAP_SID(bsid).formatCanonical() for bsid in ADUtils.get_entry_property(entry, 'sIDHistory', [])]
+        props['sidhistory'] = [bsid if isinstance(bsid, str) else LDAP_SID(bsid).formatCanonical() for bsid in ADUtils.get_entry_property(entry, 'sIDHistory', [])]
         # v4 props
         whencreated = ADUtils.get_entry_property(entry, 'whencreated', default=0)
         if isinstance(whencreated, int):

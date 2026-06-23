@@ -185,7 +185,7 @@ class ADComputer(object):
             props['operatingsystemservicepack'] = osservicepack
             props['operatingsystemversion'] = osversion
 
-            props['sidhistory'] = [LDAP_SID(bsid).formatCanonical() for bsid in ADUtils.get_entry_property(entry, 'sIDHistory', [])]
+            props['sidhistory'] = [bsid if isinstance(bsid, str) else LDAP_SID(bsid).formatCanonical() for bsid in ADUtils.get_entry_property(entry, 'sIDHistory', [])]
             delegatehosts = ADUtils.get_entry_property(entry, 'msDS-AllowedToDelegateTo', [])
             delegatehosts_cache = []
             for host in delegatehosts:
