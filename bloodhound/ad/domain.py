@@ -487,7 +487,7 @@ class ADDC(ADComputer):
             try:
                 nbentry = self.get_netbios_name(entry['attributes']['distinguishedName'])
                 self.ad.nbdomains[nbentry['attributes']['nETBIOSName']] = entry
-            except IndexError:
+            except (IndexError, StopIteration):
                 pass
 
         if entriesNum == 0:

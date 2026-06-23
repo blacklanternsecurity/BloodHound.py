@@ -177,6 +177,30 @@ class ADWSClient:
             logging.error('ADWS connection failed: %s', str(e))
             raise CollectionException(f'ADWS connection failed: {e}. No LDAP fallback in ADWS mode.')
 
+        self._resolve_base_dn()
+
+    def _resolve_base_dn(self) -> None:
+        """Query the rootDSE to get the server's defaultNamingContext with correct casing."""
+        try:
+            with self._io_lock:
+                results_xml = self._client.pull(
+                    query="(objectClass=*)",
+                    attributes=["defaultNamingContext", "configurationNamingContext"],
+                    search_base="",
+                    scope="Base",
+                )
+            for entry in self._parse_xml_entries(results_xml):
+                attrs = entry.get('attributes', {})
+                dn = attrs.get('defaultNamingContext')
+                if dn:
+                    if isinstance(dn, list):
+                        dn = dn[0]
+                    logging.debug('ADWS rootDSE defaultNamingContext: %s', dn)
+                    self.ad.baseDN = dn
+                break
+        except Exception as e:
+            logging.debug('Could not query rootDSE for defaultNamingContext: %s', e)
+
     @property
     def configuration_naming_context(self) -> str:
         """Return configuration partition base DN."""
