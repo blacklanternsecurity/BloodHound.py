@@ -7,6 +7,7 @@ enumeration code.
 """
 
 import logging
+import re
 import threading
 from base64 import b64decode
 from datetime import datetime
@@ -180,26 +181,41 @@ class ADWSClient:
         self._resolve_base_dn()
 
     def _resolve_base_dn(self) -> None:
-        """Query the rootDSE to get the server's defaultNamingContext with correct casing."""
+        """Verify the base DN casing against the server.
+
+        ADWS is case-sensitive about distinguished names unlike LDAP. The
+        base DN we construct from DNS is lowercased, but the server may
+        store it with mixed case. A probe search lets the server tell us
+        the real DN — either via a successful result or via MatchedDN in
+        the SOAP fault.
+        """
         try:
             with self._io_lock:
                 results_xml = self._client.pull(
-                    query="(objectClass=*)",
-                    attributes=["defaultNamingContext", "configurationNamingContext"],
-                    search_base="",
+                    query="(objectClass=domainDNS)",
+                    attributes=["distinguishedName"],
+                    search_base=self.ad.baseDN,
                     scope="Base",
                 )
             for entry in self._parse_xml_entries(results_xml):
-                attrs = entry.get('attributes', {})
-                dn = attrs.get('defaultNamingContext')
+                dn = entry.get('dn') or entry.get('attributes', {}).get('distinguishedName')
                 if dn:
                     if isinstance(dn, list):
                         dn = dn[0]
-                    logging.debug('ADWS rootDSE defaultNamingContext: %s', dn)
-                    self.ad.baseDN = dn
+                    if dn.upper() == self.ad.baseDN.upper() and dn != self.ad.baseDN:
+                        logging.debug('Corrected base DN casing: %s -> %s', self.ad.baseDN, dn)
+                        self.ad.baseDN = dn
                 break
         except Exception as e:
-            logging.debug('Could not query rootDSE for defaultNamingContext: %s', e)
+            error_str = str(e)
+            match = re.search(r'<\w+:MatchedDN>(DC=[^<]+)</\w+:MatchedDN>', error_str)
+            if match:
+                matched_dn = match.group(1)
+                if matched_dn.upper() == self.ad.baseDN.upper():
+                    logging.debug('Corrected base DN casing from MatchedDN: %s -> %s', self.ad.baseDN, matched_dn)
+                    self.ad.baseDN = matched_dn
+                    return
+            logging.debug('Could not resolve base DN casing: %s', e)
 
     @property
     def configuration_naming_context(self) -> str:
