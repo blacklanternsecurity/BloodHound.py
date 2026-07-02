@@ -74,6 +74,7 @@ class ADAuthentication(object):
 
         # Kerberos
         self.tgt = None
+        self._ccache = None
 
     def set_aeskey(self, aeskey):
         self.aeskey = aeskey
@@ -187,8 +188,27 @@ class ADAuthentication(object):
 
         username = Principal(self.username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
         servername = Principal('ldap/%s' % hostname, type=constants.PrincipalNameType.NT_SRV_INST.value)
-        tgs, cipher, _, sessionkey = getKerberosTGS(servername, self.domain, self.kdc,
-                                                                self.tgt['KDC_REP'], self.tgt['cipher'], self.tgt['sessionKey'])
+
+        # Check for a cached LDAP service ticket (e.g. from cross-realm tool)
+        cached_cred = None
+        if self._ccache is not None:
+            ldap_spn = 'ldap/%s@%s' % (hostname.upper(), self.domain.upper())
+            cached_cred = self._ccache.getCredential(ldap_spn)
+
+        if cached_cred:
+            logging.info('Using cached LDAP service ticket for %s', hostname)
+            tgs_dict = cached_cred.toTGS()
+            tgs = tgs_dict['KDC_REP']
+            cipher = tgs_dict['cipher']
+            sessionkey = tgs_dict['sessionKey']
+            # Use the ccache principal's realm for the AP-REQ authenticator
+            try:
+                self.userdomain = self._ccache.principal.realm['data'].decode()
+            except Exception:
+                pass
+        else:
+            tgs, cipher, _, sessionkey = getKerberosTGS(servername, self.domain, self.kdc,
+                                                                    self.tgt['KDC_REP'], self.tgt['cipher'], self.tgt['sessionKey'])
 
         # Let's build a NegTokenInit with a Kerberos AP_REQ
         blob = SPNEGO_NegTokenInit()
@@ -391,8 +411,19 @@ class ADAuthentication(object):
 
         # Load TGT for our domain
         ccache = CCache.loadFile(krb5cc)
+        self._ccache = ccache
         principal = 'krbtgt/%s@%s' % (self.domain.upper(), self.domain.upper())
         creds = ccache.getCredential(principal, anySPN=False)
+
+        if creds is None:
+            # Cross-realm: look for a referral TGT for the target domain issued by any realm
+            for c in ccache.credentials:
+                server_str = c['server'].prettyPrint().decode().upper()
+                if server_str.startswith('KRBTGT/%s@' % self.domain.upper()):
+                    creds = c
+                    logging.info('Found cross-realm TGT in cache: %s', c['server'].prettyPrint().decode())
+                    break
+
         if creds is not None:
             TGT = creds.toTGT()
             # This we store for later
@@ -400,8 +431,23 @@ class ADAuthentication(object):
             tgt, cipher, session_key = TGT['KDC_REP'], TGT['cipher'], TGT['sessionKey']
             logging.info('Using TGT from cache')
         else:
+            # No TGT at all — check for usable service tickets (e.g. ldap/ from cross-realm tool)
+            has_svc = any(
+                b'/' in c['server'].prettyPrint().split(b'@')[0] and
+                not c['server'].prettyPrint().upper().startswith(b'KRBTGT/')
+                for c in ccache.credentials
+            )
+            if has_svc:
+                logging.info('No TGT in cache, but found service ticket(s) for direct use')
+                self.tgt = {'_SERVICE_TICKETS_ONLY': True}
+                return True
             logging.debug("No valid credentials found in cache. ")
             return False
+
+        # Cross-realm: skip principal check since user realm != enumeration domain
+        if self.userdomain.upper() != self.domain.upper():
+            logging.info('Cross-realm ccache: user %s@%s -> target %s', self.username, self.userdomain, self.domain)
+            return True
 
         # Verify if this ticket is actually for the specified user
         ticket = Ticket()
