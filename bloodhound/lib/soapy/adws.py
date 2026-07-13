@@ -31,6 +31,7 @@ from .soap_templates import (
     LDAP_PULL_FSTRING,
     LDAP_PUT_FSTRING,
     LDAP_QUERY_FSTRING,
+    LDAP_ROOT_DSE_FSTRING,
     NAMESPACES,
     SD_FLAGS_CONTROL_XML,
 )
@@ -516,6 +517,47 @@ class ADWSConnect:
                     results.append(item)
 
         return results
+
+    def get_rootdse(self) -> dict:
+        """Query the RootDSE via WS-Transfer Get on a temporary Resource endpoint.
+
+        Returns a dict of RootDSE attribute name -> value (strings).
+        """
+        resource_nmf = self._connect(self._fqdn, "Resource")
+        try:
+            msg = LDAP_ROOT_DSE_FSTRING.format(
+                uuid=str(uuid4()),
+                fqdn=self._fqdn,
+            )
+            resource_nmf.send(msg)
+            resp = resource_nmf.recv()
+
+            et = self._handle_str_to_xml(resp)
+            if et is None:
+                return {}
+
+            result = {}
+            addata_ns = NAMESPACES.get("addata", "")
+            ad_ns = NAMESPACES.get("ad", "")
+            for elem in et.iter():
+                tag = elem.tag
+                if addata_ns and tag.startswith("{" + addata_ns + "}"):
+                    attr_name = tag.split("}")[-1]
+                    values = elem.findall(
+                        "{%s}value" % ad_ns
+                    )
+                    if values:
+                        texts = [v.text for v in values if v.text]
+                        if len(texts) == 1:
+                            result[attr_name] = texts[0]
+                        elif texts:
+                            result[attr_name] = texts
+            return result
+        finally:
+            try:
+                resource_nmf._sock.close()
+            except Exception:
+                pass
 
     @classmethod
     def pull_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth, target_ip: str | None = None) -> Self:

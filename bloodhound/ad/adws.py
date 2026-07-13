@@ -182,26 +182,15 @@ class ADWSClient:
         self._discover_naming_contexts()
 
     def _discover_naming_contexts(self) -> None:
-        """Query the RootDSE via ADWS to discover the forest-level naming contexts."""
+        """Query the RootDSE via WS-Transfer Get to discover the forest-level naming contexts."""
         try:
-            with self._io_lock:
-                results_xml = self._client.pull(
-                    query="(objectClass=*)",
-                    attributes=[
-                        'configurationNamingContext',
-                        'schemaNamingContext',
-                    ],
-                    search_base="",
-                    scope="Base",
-                )
-            for entry in self._parse_xml_entries(results_xml):
-                attrs = entry.get('attributes', {})
-                if 'configurationNamingContext' in attrs:
-                    self._configuration_nc = attrs['configurationNamingContext']
-                    logging.debug('Discovered configurationNamingContext: %s', self._configuration_nc)
-                if 'schemaNamingContext' in attrs:
-                    self._schema_nc = attrs['schemaNamingContext']
-                    logging.debug('Discovered schemaNamingContext: %s', self._schema_nc)
+            rootdse = self._client.get_rootdse()
+            if 'configurationNamingContext' in rootdse:
+                self._configuration_nc = rootdse['configurationNamingContext']
+                logging.debug('Discovered configurationNamingContext: %s', self._configuration_nc)
+            if 'schemaNamingContext' in rootdse:
+                self._schema_nc = rootdse['schemaNamingContext']
+                logging.debug('Discovered schemaNamingContext: %s', self._schema_nc)
         except Exception as e:
             logging.debug('RootDSE discovery via ADWS failed: %s', e)
 
