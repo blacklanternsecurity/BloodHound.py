@@ -134,6 +134,8 @@ class ADWSClient:
         self.ad = ad
         self._client: Optional[ADWSConnect] = None
         self._schema_classes: Optional[set] = None
+        self._configuration_nc: Optional[str] = None
+        self._schema_nc: Optional[str] = None
         # Serializes SOAP request/response cycles on the single shared TCP/NMF
         # stream. Without this, the main enumeration thread and the ACL
         # callback thread (from the multiprocessing pool's result callback)
@@ -177,14 +179,51 @@ class ADWSClient:
             logging.error('ADWS connection failed: %s', str(e))
             raise CollectionException(f'ADWS connection failed: {e}. No LDAP fallback in ADWS mode.')
 
+        self._discover_naming_contexts()
+
+    def _discover_naming_contexts(self) -> None:
+        """Query the RootDSE via ADWS to discover the forest-level naming contexts."""
+        try:
+            with self._io_lock:
+                results_xml = self._client.pull(
+                    query="(objectClass=*)",
+                    attributes=[
+                        'configurationNamingContext',
+                        'schemaNamingContext',
+                    ],
+                    search_base="",
+                    scope="Base",
+                )
+            for entry in self._parse_xml_entries(results_xml):
+                attrs = entry.get('attributes', {})
+                if 'configurationNamingContext' in attrs:
+                    self._configuration_nc = attrs['configurationNamingContext']
+                    logging.debug('Discovered configurationNamingContext: %s', self._configuration_nc)
+                if 'schemaNamingContext' in attrs:
+                    self._schema_nc = attrs['schemaNamingContext']
+                    logging.debug('Discovered schemaNamingContext: %s', self._schema_nc)
+        except Exception as e:
+            logging.debug('RootDSE discovery via ADWS failed: %s', e)
+
+        if not self._configuration_nc:
+            self._configuration_nc = f"CN=Configuration,{self.ad.baseDN}"
+            logging.debug('Using default configurationNamingContext: %s', self._configuration_nc)
+        if not self._schema_nc:
+            self._schema_nc = f"CN=Schema,{self._configuration_nc}"
+            logging.debug('Using default schemaNamingContext: %s', self._schema_nc)
+
     @property
     def configuration_naming_context(self) -> str:
-        """Return configuration partition base DN."""
+        """Return configuration partition base DN (discovered from RootDSE when available)."""
+        if self._configuration_nc:
+            return self._configuration_nc
         return f"CN=Configuration,{self.ad.baseDN}"
 
     @property
     def schema_naming_context(self) -> str:
-        """Return schema partition base DN."""
+        """Return schema partition base DN (discovered from RootDSE when available)."""
+        if self._schema_nc:
+            return self._schema_nc
         return f"CN=Schema,CN=Configuration,{self.ad.baseDN}"
 
     def supports_object_class(self, class_name: str) -> bool:
