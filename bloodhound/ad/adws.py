@@ -372,6 +372,7 @@ class ADWSClient:
                 )
 
             for entry in self._parse_xml_entries(results_xml):
+                self._complete_ranged_members(entry)
                 yield entry
 
         except Exception as e:
@@ -419,6 +420,62 @@ class ADWSClient:
         except Exception as e:
             logging.warning('ADWS get_single %r failed: %s', dn, e)
             return None
+
+    # AD's default MaxValRange is 1500. The ADWS XPath selection dialect
+    # does not support LDAP range syntax (member;range=N-*), so we use a
+    # reverse query instead: (memberOf=<group_dn>) returns every member
+    # object as a separate search result, paged normally and not subject
+    # to MaxValRange. memberOf is a backlink attribute and is always
+    # complete.
+    _RANGE_THRESHOLD = 1499
+
+    def _complete_ranged_members(self, entry: Dict[str, Any]) -> None:
+        """Re-query group members via reverse memberOf when the forward
+        member attribute was range-limited by the server."""
+        members = entry['attributes'].get('member')
+        if not isinstance(members, list) or len(members) < self._RANGE_THRESHOLD:
+            return
+
+        dn = entry.get('dn')
+        if not dn:
+            return
+
+        from ldap3.utils.conv import escape_filter_chars
+        escaped_dn = escape_filter_chars(dn)
+
+        try:
+            with self._io_lock:
+                result = self._client.pull(
+                    query=f'(memberOf={escaped_dn})',
+                    attributes=['distinguishedName'],
+                    scope="Subtree",
+                )
+        except Exception as e:
+            logging.debug('Reverse member query for %s failed: %s', dn, e)
+            return
+
+        all_member_dns: list = []
+        for items_elem in result.findall(".//wsen:Items", namespaces=NAMESPACES):
+            for item in items_elem:
+                for attr in item:
+                    attr_name = attr.tag.split("}")[-1] if "}" in attr.tag else attr.tag
+                    if attr_name == 'distinguishedName':
+                        for v_elem in attr.findall(
+                            ".//{http://schemas.microsoft.com/2008/1/ActiveDirectory}value"
+                        ):
+                            text = v_elem.text
+                            if text is None:
+                                text = "".join(v_elem.itertext())
+                            if text:
+                                all_member_dns.append(text)
+
+        if all_member_dns and len(all_member_dns) > len(members):
+            logging.debug('Reverse member query for %s: %d members (was %d)',
+                          dn, len(all_member_dns), len(members))
+            entry['attributes']['member'] = all_member_dns
+            entry['raw_attributes']['member'] = [
+                m.encode('utf-8') if isinstance(m, str) else m for m in all_member_dns
+            ]
 
     def _parse_xml_entries(self, xml_root: ElementTree.Element) -> Generator[Dict[str, Any], None, None]:
         """
