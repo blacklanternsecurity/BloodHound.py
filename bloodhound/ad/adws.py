@@ -372,6 +372,7 @@ class ADWSClient:
                 )
 
             for entry in self._parse_xml_entries(results_xml):
+                self._complete_ranged_members(entry)
                 yield entry
 
         except Exception as e:
@@ -419,6 +420,67 @@ class ADWSClient:
         except Exception as e:
             logging.warning('ADWS get_single %r failed: %s', dn, e)
             return None
+
+    # AD's default MaxValRange is 1500. When a multi-valued attribute has
+    # more values than this, the server returns only the first batch. We
+    # detect this by checking the member count and issue follow-up Base
+    # queries with range-selection to fetch the remaining values.
+    _RANGE_THRESHOLD = 1499
+
+    def _complete_ranged_members(self, entry: Dict[str, Any]) -> None:
+        """Fetch remaining group members when the initial result was range-limited."""
+        members = entry['attributes'].get('member')
+        if not isinstance(members, list) or len(members) < self._RANGE_THRESHOLD:
+            return
+
+        dn = entry.get('dn')
+        if not dn:
+            return
+
+        offset = len(members)
+        while True:
+            range_attr = f'member;range={offset}-*'
+            try:
+                with self._io_lock:
+                    result = self._client.pull(
+                        query="(objectClass=*)",
+                        attributes=[range_attr],
+                        search_base=dn,
+                        scope="Base",
+                    )
+            except Exception as e:
+                logging.debug('Range retrieval for %s at offset %d failed: %s', dn, offset, e)
+                break
+
+            new_members: list = []
+            for items_elem in result.findall(".//wsen:Items", namespaces=NAMESPACES):
+                for item in items_elem:
+                    for attr in item:
+                        value_elems = attr.findall(
+                            ".//{http://schemas.microsoft.com/2008/1/ActiveDirectory}value"
+                        )
+                        for v_elem in value_elems:
+                            text = v_elem.text
+                            if text is None:
+                                text = "".join(v_elem.itertext())
+                            if text:
+                                new_members.append(text)
+
+            if not new_members:
+                break
+
+            members.extend(new_members)
+            offset += len(new_members)
+            logging.debug('Range retrieval for %s: got %d more members (total %d)',
+                          dn, len(new_members), len(members))
+
+            if len(new_members) < self._RANGE_THRESHOLD:
+                break
+
+        entry['attributes']['member'] = members
+        entry['raw_attributes']['member'] = [
+            m.encode('utf-8') if isinstance(m, str) else m for m in members
+        ]
 
     def _parse_xml_entries(self, xml_root: ElementTree.Element) -> Generator[Dict[str, Any], None, None]:
         """
