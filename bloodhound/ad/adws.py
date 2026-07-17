@@ -421,14 +421,17 @@ class ADWSClient:
             logging.warning('ADWS get_single %r failed: %s', dn, e)
             return None
 
-    # AD's default MaxValRange is 1500. When a multi-valued attribute has
-    # more values than this, the server returns only the first batch. We
-    # detect this by checking the member count and issue follow-up Base
-    # queries with range-selection to fetch the remaining values.
+    # AD's default MaxValRange is 1500. The ADWS XPath selection dialect
+    # does not support LDAP range syntax (member;range=N-*), so we use a
+    # reverse query instead: (memberOf=<group_dn>) returns every member
+    # object as a separate search result, paged normally and not subject
+    # to MaxValRange. memberOf is a backlink attribute and is always
+    # complete.
     _RANGE_THRESHOLD = 1499
 
     def _complete_ranged_members(self, entry: Dict[str, Any]) -> None:
-        """Fetch remaining group members when the initial result was range-limited."""
+        """Re-query group members via reverse memberOf when the forward
+        member attribute was range-limited by the server."""
         members = entry['attributes'].get('member')
         if not isinstance(members, list) or len(members) < self._RANGE_THRESHOLD:
             return
@@ -437,50 +440,42 @@ class ADWSClient:
         if not dn:
             return
 
-        offset = len(members)
-        while True:
-            range_attr = f'member;range={offset}-*'
-            try:
-                with self._io_lock:
-                    result = self._client.pull(
-                        query="(objectClass=*)",
-                        attributes=[range_attr],
-                        search_base=dn,
-                        scope="Base",
-                    )
-            except Exception as e:
-                logging.debug('Range retrieval for %s at offset %d failed: %s', dn, offset, e)
-                break
+        from ldap3.utils.conv import escape_filter_chars
+        escaped_dn = escape_filter_chars(dn)
 
-            new_members: list = []
-            for items_elem in result.findall(".//wsen:Items", namespaces=NAMESPACES):
-                for item in items_elem:
-                    for attr in item:
-                        value_elems = attr.findall(
+        try:
+            with self._io_lock:
+                result = self._client.pull(
+                    query=f'(memberOf={escaped_dn})',
+                    attributes=['distinguishedName'],
+                    scope="Subtree",
+                )
+        except Exception as e:
+            logging.debug('Reverse member query for %s failed: %s', dn, e)
+            return
+
+        all_member_dns: list = []
+        for items_elem in result.findall(".//wsen:Items", namespaces=NAMESPACES):
+            for item in items_elem:
+                for attr in item:
+                    attr_name = attr.tag.split("}")[-1] if "}" in attr.tag else attr.tag
+                    if attr_name == 'distinguishedName':
+                        for v_elem in attr.findall(
                             ".//{http://schemas.microsoft.com/2008/1/ActiveDirectory}value"
-                        )
-                        for v_elem in value_elems:
+                        ):
                             text = v_elem.text
                             if text is None:
                                 text = "".join(v_elem.itertext())
                             if text:
-                                new_members.append(text)
+                                all_member_dns.append(text)
 
-            if not new_members:
-                break
-
-            members.extend(new_members)
-            offset += len(new_members)
-            logging.debug('Range retrieval for %s: got %d more members (total %d)',
-                          dn, len(new_members), len(members))
-
-            if len(new_members) < self._RANGE_THRESHOLD:
-                break
-
-        entry['attributes']['member'] = members
-        entry['raw_attributes']['member'] = [
-            m.encode('utf-8') if isinstance(m, str) else m for m in members
-        ]
+        if all_member_dns and len(all_member_dns) > len(members):
+            logging.debug('Reverse member query for %s: %d members (was %d)',
+                          dn, len(all_member_dns), len(members))
+            entry['attributes']['member'] = all_member_dns
+            entry['raw_attributes']['member'] = [
+                m.encode('utf-8') if isinstance(m, str) else m for m in all_member_dns
+            ]
 
     def _parse_xml_entries(self, xml_root: ElementTree.Element) -> Generator[Dict[str, Any], None, None]:
         """
