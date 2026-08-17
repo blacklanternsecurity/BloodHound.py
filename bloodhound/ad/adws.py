@@ -407,10 +407,6 @@ class ADWSClient:
         logging.debug('ADWS search: filter=%s, base=%s, scope=%s', search_filter, search_base, adws_scope)
 
         try:
-            # Hold the lock only for the SOAP request/response. pull() completes
-            # its enumerate/pull loop before returning, so the lock does not span
-            # generator yields, which keeps consumers free to recurse back into
-            # search() without deadlocking.
             with self._io_lock:
                 results_xml = self._client.pull(
                     query=search_filter,
@@ -425,7 +421,26 @@ class ADWSClient:
                 yield entry
 
         except Exception as e:
-            logging.warning('ADWS search %r failed: %s', search_filter, e)
+            if query_sd and 'does not support the control' in str(e):
+                logging.warning('Server does not support SD_FLAGS control, retrying without security descriptors')
+                if 'nTSecurityDescriptor' in attr_list:
+                    attr_list.remove('nTSecurityDescriptor')
+                try:
+                    with self._io_lock:
+                        results_xml = self._client.pull(
+                            query=search_filter,
+                            attributes=attr_list,
+                            search_base=search_base,
+                            scope=adws_scope,
+                            query_sd=False,
+                        )
+                    for entry in self._parse_xml_entries(results_xml):
+                        self._complete_ranged_members(entry)
+                        yield entry
+                except Exception as e2:
+                    logging.warning('ADWS search %r retry failed: %s', search_filter, e2)
+            else:
+                logging.warning('ADWS search %r failed: %s', search_filter, e)
 
     def get_single(
         self,
