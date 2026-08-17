@@ -369,11 +369,15 @@ class ADWSConnect:
         (OID 1.2.840.113556.1.4.801) so the server returns nTSecurityDescriptor
         without requiring SeSecurityPrivilege.
         """
+        controls = SD_FLAGS_CONTROL_XML if query_sd else ""
+        if query_sd:
+            logging.debug('Pull request includes SD_FLAGS control (OID 1.2.840.113556.1.4.801)')
+
         pull_vars = {
             "uuid": str(uuid4()),
             "fqdn": remoteName,
             "enum_ctx": enum_ctx,
-            "controls": SD_FLAGS_CONTROL_XML if query_sd else "",
+            "controls": controls,
         }
 
         pull = LDAP_PULL_FSTRING.format(**pull_vars)

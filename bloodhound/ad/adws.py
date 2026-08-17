@@ -404,7 +404,7 @@ class ADWSClient:
 
         adws_scope = self._SCOPE_MAP.get(str(search_scope).upper(), 'Subtree')
 
-        logging.debug('ADWS search: filter=%s, base=%s, scope=%s', search_filter, search_base, adws_scope)
+        logging.debug('ADWS search: filter=%s, base=%s, scope=%s, query_sd=%s', search_filter, search_base, adws_scope, query_sd)
 
         try:
             with self._io_lock:
