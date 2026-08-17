@@ -182,83 +182,61 @@ class ADWSClient:
 
         self._resolve_base_dn()
 
-    def _query_rootdse(self) -> None:
-        """Query the rootDSE to discover naming contexts.
+    def _discover_configuration_from_domain(self) -> None:
+        """Discover the Configuration partition DN from the domain object.
 
-        The rootDSE is a Base-scope search on an empty DN. It returns
-        the server's actual naming contexts, which is essential for
-        child domains where the Configuration/Schema partitions live
-        at the forest root rather than under the domain's own base DN.
+        The domain object's fSMORoleOwner attribute points to the NTDS
+        Settings object of the PDC, which lives inside the Configuration
+        partition. For example:
+            CN=NTDS Settings,CN=DC01,CN=Servers,CN=Site,CN=Sites,CN=Configuration,DC=forest,DC=root
+
+        By finding 'CN=Configuration,' in that DN we can extract the
+        real Configuration partition DN. This works even when the forest
+        root is a completely different domain name from the child domain.
         """
-        logging.debug('Querying rootDSE for naming contexts')
+        logging.debug('Attempting to discover Configuration DN from domain fSMORoleOwner')
         try:
             with self._io_lock:
                 results_xml = self._client.pull(
                     query="(objectClass=*)",
-                    attributes=[
-                        "defaultNamingContext",
-                        "configurationNamingContext",
-                        "schemaNamingContext",
-                    ],
-                    search_base="",
+                    attributes=["fSMORoleOwner"],
+                    search_base=self.ad.baseDN,
                     scope="Base",
                 )
-            entries_found = 0
             for entry in self._parse_xml_entries(results_xml):
-                entries_found += 1
                 attrs = entry.get('attributes', {})
-                logging.debug('RootDSE returned attributes: %s', list(attrs.keys()))
-                default_nc = attrs.get('defaultNamingContext')
-                config_nc = attrs.get('configurationNamingContext')
-                schema_nc = attrs.get('schemaNamingContext')
-
-                if default_nc:
-                    if isinstance(default_nc, list):
-                        default_nc = default_nc[0]
-                    logging.debug('RootDSE defaultNamingContext: %s', default_nc)
-                    self.ad.baseDN = default_nc
-                else:
-                    logging.debug('RootDSE did not return defaultNamingContext')
-
-                if config_nc:
-                    if isinstance(config_nc, list):
-                        config_nc = config_nc[0]
-                    logging.debug('RootDSE configurationNamingContext: %s', config_nc)
-                    self._configuration_dn = config_nc
-                else:
-                    logging.debug('RootDSE did not return configurationNamingContext')
-
-                if schema_nc:
-                    if isinstance(schema_nc, list):
-                        schema_nc = schema_nc[0]
-                    logging.debug('RootDSE schemaNamingContext: %s', schema_nc)
-                    self._schema_dn = schema_nc
-                else:
-                    logging.debug('RootDSE did not return schemaNamingContext')
-
+                fsmo = attrs.get('fSMORoleOwner')
+                if fsmo:
+                    if isinstance(fsmo, list):
+                        fsmo = fsmo[0]
+                    logging.debug('Domain fSMORoleOwner: %s', fsmo)
+                    idx = fsmo.upper().find('CN=CONFIGURATION,')
+                    if idx != -1:
+                        config_dn = fsmo[idx:]
+                        logging.debug('Extracted Configuration DN from fSMORoleOwner: %s', config_dn)
+                        self._configuration_dn = config_dn
+                        return
+                logging.debug('Could not extract Configuration DN from fSMORoleOwner')
                 return
-            if entries_found == 0:
-                logging.debug('RootDSE query returned no entries')
         except Exception as e:
-            logging.debug('RootDSE query failed, will probe DNs manually: %s', e)
+            logging.debug('fSMORoleOwner query failed: %s', e)
 
     def _resolve_base_dn(self) -> None:
         """Resolve the correct base DN and configuration partition DN.
 
-        First tries a rootDSE query which gives the server's actual
-        naming contexts (works for child domains in multi-domain
-        forests). Falls back to probing DN casing and walking up DC
-        components.
+        Probes the base DN for correct casing, then discovers the
+        Configuration partition. First tries extracting it from the
+        domain object's fSMORoleOwner (works for child domains in
+        multi-domain forests where the forest root has a different
+        DNS name). Falls back to walking up DC components.
         """
         logging.debug('Initial baseDN from DNS: %s', self.ad.baseDN)
-        self._query_rootdse()
+        self.ad.baseDN = self._probe_dn(self.ad.baseDN)
+        self._discover_configuration_from_domain()
 
         if not self._configuration_dn:
-            logging.debug('RootDSE did not provide configuration DN, falling back to probe')
-            self.ad.baseDN = self._probe_dn(self.ad.baseDN)
+            logging.debug('fSMORoleOwner discovery failed, falling back to DC component probe')
             self._resolve_configuration_dn()
-        else:
-            self.ad.baseDN = self._probe_dn(self.ad.baseDN)
 
         logging.debug('Resolved baseDN: %s', self.ad.baseDN)
         logging.debug('Resolved configurationNamingContext: %s', self.configuration_naming_context)
