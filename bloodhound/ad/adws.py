@@ -136,6 +136,7 @@ class ADWSClient:
         self._client: Optional[ADWSConnect] = None
         self._schema_classes: Optional[set] = None
         self._configuration_dn: Optional[str] = None
+        self._schema_dn: Optional[str] = None
         # Serializes SOAP request/response cycles on the single shared TCP/NMF
         # stream. Without this, the main enumeration thread and the ACL
         # callback thread (from the multiprocessing pool's result callback)
@@ -181,21 +182,69 @@ class ADWSClient:
 
         self._resolve_base_dn()
 
+    def _query_rootdse(self) -> None:
+        """Query the rootDSE to discover naming contexts.
+
+        The rootDSE is a Base-scope search on an empty DN. It returns
+        the server's actual naming contexts, which is essential for
+        child domains where the Configuration/Schema partitions live
+        at the forest root rather than under the domain's own base DN.
+        """
+        try:
+            with self._io_lock:
+                results_xml = self._client.pull(
+                    query="(objectClass=*)",
+                    attributes=[
+                        "defaultNamingContext",
+                        "configurationNamingContext",
+                        "schemaNamingContext",
+                    ],
+                    search_base="",
+                    scope="Base",
+                )
+            for entry in self._parse_xml_entries(results_xml):
+                attrs = entry.get('attributes', {})
+                default_nc = attrs.get('defaultNamingContext')
+                config_nc = attrs.get('configurationNamingContext')
+                schema_nc = attrs.get('schemaNamingContext')
+
+                if default_nc:
+                    if isinstance(default_nc, list):
+                        default_nc = default_nc[0]
+                    logging.debug('RootDSE defaultNamingContext: %s', default_nc)
+                    self.ad.baseDN = default_nc
+
+                if config_nc:
+                    if isinstance(config_nc, list):
+                        config_nc = config_nc[0]
+                    logging.debug('RootDSE configurationNamingContext: %s', config_nc)
+                    self._configuration_dn = config_nc
+
+                if schema_nc:
+                    if isinstance(schema_nc, list):
+                        schema_nc = schema_nc[0]
+                    logging.debug('RootDSE schemaNamingContext: %s', schema_nc)
+                    self._schema_dn = schema_nc
+
+                return
+        except Exception as e:
+            logging.debug('RootDSE query failed, will probe DNs manually: %s', e)
+
     def _resolve_base_dn(self) -> None:
         """Resolve the correct base DN and configuration partition DN.
 
-        ADWS is case-sensitive about distinguished names unlike LDAP. The
-        base DN we construct from DNS is lowercased, but the server may
-        store it with mixed case. A probe search lets the server tell us
-        the real DN — either via a successful result or via MatchedDN in
-        the SOAP fault.
-
-        The Configuration partition lives at the forest root, not the
-        domain root, so for child domains we also need to discover the
-        real configuration DN rather than assuming it's under our baseDN.
+        First tries a rootDSE query which gives the server's actual
+        naming contexts (works for child domains in multi-domain
+        forests). Falls back to probing DN casing and walking up DC
+        components.
         """
-        self.ad.baseDN = self._probe_dn(self.ad.baseDN)
-        self._resolve_configuration_dn()
+        self._query_rootdse()
+
+        if not self._configuration_dn:
+            self.ad.baseDN = self._probe_dn(self.ad.baseDN)
+            self._resolve_configuration_dn()
+        else:
+            self.ad.baseDN = self._probe_dn(self.ad.baseDN)
 
     def _probe_dn(self, dn: str) -> str:
         """Search for a DN and return the server's correctly-cased version."""
@@ -265,6 +314,8 @@ class ADWSClient:
     @property
     def schema_naming_context(self) -> str:
         """Return schema partition base DN."""
+        if self._schema_dn:
+            return self._schema_dn
         return f"CN=Schema,{self.configuration_naming_context}"
 
     def supports_object_class(self, class_name: str) -> bool:
