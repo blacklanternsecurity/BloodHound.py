@@ -306,6 +306,7 @@ class ADWSConnect:
         logging.debug(f"Connecting to ADWS at {connect_host}:9389 for {self._resource}")
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(30)
         sock.connect(server_address)
 
         nmf = ms_nmf.NMFConnection(
