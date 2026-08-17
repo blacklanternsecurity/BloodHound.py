@@ -190,6 +190,7 @@ class ADWSClient:
         child domains where the Configuration/Schema partitions live
         at the forest root rather than under the domain's own base DN.
         """
+        logging.debug('Querying rootDSE for naming contexts')
         try:
             with self._io_lock:
                 results_xml = self._client.pull(
@@ -202,8 +203,11 @@ class ADWSClient:
                     search_base="",
                     scope="Base",
                 )
+            entries_found = 0
             for entry in self._parse_xml_entries(results_xml):
+                entries_found += 1
                 attrs = entry.get('attributes', {})
+                logging.debug('RootDSE returned attributes: %s', list(attrs.keys()))
                 default_nc = attrs.get('defaultNamingContext')
                 config_nc = attrs.get('configurationNamingContext')
                 schema_nc = attrs.get('schemaNamingContext')
@@ -213,20 +217,28 @@ class ADWSClient:
                         default_nc = default_nc[0]
                     logging.debug('RootDSE defaultNamingContext: %s', default_nc)
                     self.ad.baseDN = default_nc
+                else:
+                    logging.debug('RootDSE did not return defaultNamingContext')
 
                 if config_nc:
                     if isinstance(config_nc, list):
                         config_nc = config_nc[0]
                     logging.debug('RootDSE configurationNamingContext: %s', config_nc)
                     self._configuration_dn = config_nc
+                else:
+                    logging.debug('RootDSE did not return configurationNamingContext')
 
                 if schema_nc:
                     if isinstance(schema_nc, list):
                         schema_nc = schema_nc[0]
                     logging.debug('RootDSE schemaNamingContext: %s', schema_nc)
                     self._schema_dn = schema_nc
+                else:
+                    logging.debug('RootDSE did not return schemaNamingContext')
 
                 return
+            if entries_found == 0:
+                logging.debug('RootDSE query returned no entries')
         except Exception as e:
             logging.debug('RootDSE query failed, will probe DNs manually: %s', e)
 
@@ -238,13 +250,19 @@ class ADWSClient:
         forests). Falls back to probing DN casing and walking up DC
         components.
         """
+        logging.debug('Initial baseDN from DNS: %s', self.ad.baseDN)
         self._query_rootdse()
 
         if not self._configuration_dn:
+            logging.debug('RootDSE did not provide configuration DN, falling back to probe')
             self.ad.baseDN = self._probe_dn(self.ad.baseDN)
             self._resolve_configuration_dn()
         else:
             self.ad.baseDN = self._probe_dn(self.ad.baseDN)
+
+        logging.debug('Resolved baseDN: %s', self.ad.baseDN)
+        logging.debug('Resolved configurationNamingContext: %s', self.configuration_naming_context)
+        logging.debug('Resolved schemaNamingContext: %s', self.schema_naming_context)
 
     def _probe_dn(self, dn: str) -> str:
         """Search for a DN and return the server's correctly-cased version."""
@@ -407,6 +425,8 @@ class ADWSClient:
             attr_list.append("nTSecurityDescriptor")
 
         adws_scope = self._SCOPE_MAP.get(str(search_scope).upper(), 'Subtree')
+
+        logging.debug('ADWS search: filter=%s, base=%s, scope=%s', search_filter, search_base, adws_scope)
 
         try:
             # Hold the lock only for the SOAP request/response. pull() completes
