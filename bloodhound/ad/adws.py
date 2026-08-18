@@ -8,6 +8,7 @@ enumeration code.
 
 import logging
 import re
+import time
 import threading
 from base64 import b64decode
 from datetime import datetime
@@ -406,40 +407,36 @@ class ADWSClient:
 
         logging.debug('ADWS search: filter=%s, base=%s, scope=%s, query_sd=%s', search_filter, search_base, adws_scope, query_sd)
 
-        try:
-            with self._io_lock:
-                results_xml = self._client.pull(
-                    query=search_filter,
-                    attributes=attr_list,
-                    search_base=search_base,
-                    scope=adws_scope,
-                    query_sd=query_sd,
-                )
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                with self._io_lock:
+                    results_xml = self._client.pull(
+                        query=search_filter,
+                        attributes=attr_list,
+                        search_base=search_base,
+                        scope=adws_scope,
+                        query_sd=query_sd,
+                    )
 
-            for entry in self._parse_xml_entries(results_xml):
-                self._complete_ranged_members(entry)
-                yield entry
+                for entry in self._parse_xml_entries(results_xml):
+                    self._complete_ranged_members(entry)
+                    yield entry
+                return
 
-        except Exception as e:
-            if query_sd and 'does not support the control' in str(e):
-                logging.warning('Server does not support SD_FLAGS control, retrying without security descriptors')
-                if 'nTSecurityDescriptor' in attr_list:
-                    attr_list.remove('nTSecurityDescriptor')
-                try:
-                    with self._io_lock:
-                        results_xml = self._client.pull(
-                            query=search_filter,
-                            attributes=attr_list,
-                            search_base=search_base,
-                            scope=adws_scope,
-                            query_sd=False,
-                        )
-                    for entry in self._parse_xml_entries(results_xml):
-                        self._complete_ranged_members(entry)
-                        yield entry
-                except Exception as e2:
-                    logging.warning('ADWS search %r retry failed: %s', search_filter, e2)
-            else:
+            except Exception as e:
+                error_str = str(e)
+                if query_sd and 'does not support the control' in error_str:
+                    logging.warning('Server does not support SD_FLAGS control, retrying without security descriptors')
+                    if 'nTSecurityDescriptor' in attr_list:
+                        attr_list.remove('nTSecurityDescriptor')
+                    query_sd = False
+                    continue
+                if 'NoConnectionAvailable' in error_str and attempt < max_retries:
+                    wait = 2 ** attempt
+                    logging.debug('ADWS server busy, retrying in %ds (%d/%d)', wait, attempt + 1, max_retries)
+                    time.sleep(wait)
+                    continue
                 logging.warning('ADWS search %r failed: %s', search_filter, e)
 
     def get_single(
@@ -466,24 +463,29 @@ class ADWSClient:
         else:
             attr_list = list(attributes)
 
-        try:
-            # Use the DN as the search base with a simple filter.
-            # See search() for the rationale on the I/O lock.
-            with self._io_lock:
-                results_xml = self._client.pull(
-                    query="(objectClass=*)",
-                    attributes=attr_list,
-                    search_base=dn,
-                )
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                with self._io_lock:
+                    results_xml = self._client.pull(
+                        query="(objectClass=*)",
+                        attributes=attr_list,
+                        search_base=dn,
+                    )
 
-            entries = list(self._parse_xml_entries(results_xml))
-            if entries:
-                return entries[0]
-            return None
+                entries = list(self._parse_xml_entries(results_xml))
+                if entries:
+                    return entries[0]
+                return None
 
-        except Exception as e:
-            logging.warning('ADWS get_single %r failed: %s', dn, e)
-            return None
+            except Exception as e:
+                if 'NoConnectionAvailable' in str(e) and attempt < max_retries:
+                    wait = 2 ** attempt
+                    logging.debug('ADWS server busy, retrying get_single in %ds (%d/%d)', wait, attempt + 1, max_retries)
+                    time.sleep(wait)
+                    continue
+                logging.warning('ADWS get_single %r failed: %s', dn, e)
+                return None
 
     # AD's default MaxValRange is 1500. The ADWS XPath selection dialect
     # does not support LDAP range syntax (member;range=N-*), so we use a
