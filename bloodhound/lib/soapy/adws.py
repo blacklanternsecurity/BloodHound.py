@@ -528,6 +528,47 @@ class ADWSConnect:
 
         return results
 
+    def pull_iter(
+        self,
+        query: str,
+        attributes: list,
+        search_base: str | None = None,
+        scope: str = "Subtree",
+        query_sd: bool = False,
+    ):
+        """Like pull(), but yields each batch's XML element instead of
+        collecting everything in memory. Callers should parse and discard
+        each batch to keep memory usage constant."""
+        if self._resource != "Enumeration":
+            raise NotImplementedError("pull_iter is only supported on 'pull' clients")
+
+        enum_ctx = self._query_enumeration(
+            remoteName=self._fqdn,
+            nmf=self._nmf,
+            query=query,
+            attributes=attributes,
+            search_base=search_base,
+            scope=scope,
+        )
+        if enum_ctx is None:
+            raise ValueError("unable to get enumeration context")
+
+        batch_count = 0
+        more_results = True
+        while more_results:
+            try:
+                et, more_results = self._pull_results(
+                    remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
+                    query_sd=query_sd,
+                )
+            except Exception as e:
+                if batch_count > 0:
+                    logging.warning('ADWS connection error after %d batches, returning partial results: %s', batch_count, e)
+                    return
+                raise
+            batch_count += 1
+            yield et
+
     @classmethod
     def pull_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth, target_ip: str | None = None) -> Self:
         return cls(ip, domain, username, auth, "Enumeration", target_ip=target_ip)
