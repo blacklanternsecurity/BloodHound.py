@@ -592,5 +592,25 @@ class SamCache(SidCache):
     """
     pass
 
+class DNCache(dict):
+    """Dict that normalizes DN keys for consistent cache lookups.
+
+    ADWS can return DNs with different spacing or casing in different
+    contexts (distinguishedName vs member attribute), causing cache
+    misses on identical objects. This normalizes all keys on access.
+    """
+    @staticmethod
+    def _normalize(key):
+        return key.upper().replace(', ', ',').strip()
+
+    def __setitem__(self, key, value):
+        super().__setitem__(self._normalize(key), value)
+
+    def __getitem__(self, key):
+        return super().__getitem__(self._normalize(key))
+
+    def __contains__(self, key):
+        return super().__contains__(self._normalize(key))
+
 class CollectionException(Exception):
     pass

@@ -242,6 +242,7 @@ class MembershipEnumerator(object):
         self.result_q.join()
 
         logging.debug('Finished writing users')
+        logging.info('DN cache size after user enumeration: %d entries', len(self.addomain.dncache))
 
     def enumerate_groups(self, timestamp="", fileNamePrefix=""):
 

@@ -33,7 +33,7 @@ from dns import resolver
 from ldap3 import ALL_ATTRIBUTES, BASE, SUBTREE, LEVEL
 from ldap3.core.exceptions import LDAPKeyError, LDAPAttributeError, LDAPCursorError, LDAPNoSuchObjectResult, LDAPSocketReceiveError, LDAPSocketSendError, LDAPCommunicationError
 from ldap3.protocol.microsoft import security_descriptor_control
-from bloodhound.ad.utils import ADUtils, DNSCache, SidCache, SamCache, CollectionException
+from bloodhound.ad.utils import ADUtils, DNSCache, SidCache, SamCache, DNCache, CollectionException
 from bloodhound.ad.computer import ADComputer
 from bloodhound.enumeration.objectresolver import ObjectResolver
 
@@ -843,9 +843,9 @@ class AD(object):
         self.sidcache = SidCache()
         # Create a thread-safe SAM lookup cache
         self.samcache = SamCache()
-        # DN cache dict - use generic cache for all objects
-        # holds only direct bloodhound output
-        self.dncache = {}
+        # DN cache - normalizes keys (uppercased, stripped spaces) for
+        # consistent lookups regardless of DN formatting differences.
+        self.dncache = DNCache()
         self.newsidcache = SidCache()
         # Create SID cache for computer accounts
         self.computersidcache = SidCache()
@@ -895,7 +895,7 @@ class AD(object):
     def load_cachefile(self, cachefile):
         with codecs.open(cachefile, 'r', 'utf-8') as cfile:
             cachedata = json.load(cfile)
-        self.dncache = cachedata['dncache']
+        self.dncache = DNCache(cachedata['dncache'])
         self.newsidcache.load(cachedata['sidcache'])
         logging.info('Loaded cached DNs and SIDs from cachefile')
 
@@ -1004,7 +1004,7 @@ class AD(object):
 
     def get_dn_from_cache_or_ldap(self, distinguishedname):
         try:
-            linkentry = self.dncache[distinguishedname.upper()]
+            linkentry = self.dncache[distinguishedname]
         except KeyError:
             use_gc = ADUtils.ldap2domain(distinguishedname).lower() != self.domain.lower()
             qobject = self.objectresolver.resolve_distinguishedname(distinguishedname, use_gc=use_gc)
@@ -1017,7 +1017,7 @@ class AD(object):
                 "ObjectIdentifier": resolved_entry['objectid'],
                 "ObjectType": resolved_entry['type'].capitalize()
             }
-            self.dncache[distinguishedname.upper()] = linkentry
+            self.dncache[distinguishedname] = linkentry
         return linkentry
 
 """
