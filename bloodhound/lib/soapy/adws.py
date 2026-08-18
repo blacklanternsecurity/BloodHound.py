@@ -506,12 +506,20 @@ class ADWSConnect:
 
         ElementTree.register_namespace("wsen", NAMESPACES["wsen"])
         results: ElementTree.Element = ElementTree.Element("wsen:Items")
+        batch_count = 0
         more_results = True
         while more_results:
-            et, more_results = self._pull_results(
-                remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
-                query_sd=query_sd,
-            )
+            try:
+                et, more_results = self._pull_results(
+                    remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
+                    query_sd=query_sd,
+                )
+            except Exception as e:
+                if batch_count > 0:
+                    logging.warning('ADWS connection error after %d batches, returning partial results: %s', batch_count, e)
+                    break
+                raise
+            batch_count += 1
             if len(et.findall(".//wsen:Items", namespaces=NAMESPACES)) == 0:
                 logging.debug("No objects returned in this batch")
             else:

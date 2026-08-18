@@ -22,13 +22,54 @@
 #
 ####################
 
-import os, sys, logging, argparse, getpass, time, re, datetime
+import os, sys, logging, argparse, getpass, time, re, datetime, json, codecs
 from zipfile import ZipFile
 from bloodhound.ad.domain import AD, ADDC
 from bloodhound.ad.authentication import ADAuthentication
 from bloodhound.enumeration.computers import ComputerEnumerator
 from bloodhound.enumeration.memberships import MembershipEnumerator
 from bloodhound.enumeration.domains import DomainEnumerator
+
+
+class CollectionState:
+    """Tracks collection progress for resume support."""
+
+    def __init__(self, state_file=None):
+        self.state_file = state_file
+        self.timestamp = None
+        self.completed = set()
+        if state_file and os.path.exists(state_file):
+            self._load()
+
+    def _load(self):
+        try:
+            with codecs.open(self.state_file, 'r', 'utf-8') as f:
+                data = json.load(f)
+            self.timestamp = data.get('timestamp')
+            self.completed = set(data.get('completed', []))
+            logging.info('Resuming collection from state file: %d phases completed', len(self.completed))
+        except Exception as e:
+            logging.warning('Could not load state file: %s', e)
+
+    def _save(self):
+        if not self.state_file:
+            return
+        try:
+            with codecs.open(self.state_file, 'w', 'utf-8') as f:
+                json.dump({
+                    'timestamp': self.timestamp,
+                    'completed': list(self.completed),
+                }, f)
+        except Exception as e:
+            logging.warning('Could not save state file: %s', e)
+
+    def is_done(self, phase):
+        return phase in self.completed
+
+    def mark_done(self, phase):
+        self.completed.add(phase)
+        self._save()
+        logging.info('Phase "%s" completed and saved to state', phase)
 
 """
 BloodHound.py is a Python port of BloodHound, designed to run on Linux and Windows.
@@ -65,10 +106,13 @@ class BloodHound(object):
         self.ad.create_objectresolver(self.pdc)
 
 
-    def run(self, collect, num_workers=10, disable_pooling=False, timestamp="", computerfile="", cachefile=None, exclude_dcs=False, fileNamePrefix=""):
+    def run(self, collect, num_workers=10, disable_pooling=False, timestamp="", computerfile="", cachefile=None, exclude_dcs=False, fileNamePrefix="", state=None):
         start_time = time.time()
         if cachefile:
             self.ad.load_cachefile(cachefile)
+
+        if state is None:
+            state = CollectionState()
 
         # Check early if we should enumerate computers as well
         do_computer_enum = any(method in collect for method in ['localadmin', 'session', 'loggedon', 'experimental', 'rdp', 'dcom', 'psremote'])
@@ -78,13 +122,13 @@ class BloodHound(object):
             self.pdc.prefetch_info('objectprops' in collect, 'acl' in collect, cache_computers=do_computer_enum)
             # Initialize enumerator
             membership_enum = MembershipEnumerator(self.ad, self.pdc, collect, disable_pooling)
-            membership_enum.enumerate_memberships(timestamp=timestamp, fileNamePrefix=fileNamePrefix)
+            membership_enum.enumerate_memberships(timestamp=timestamp, fileNamePrefix=fileNamePrefix, state=state)
         elif 'container' in collect:
             # Fetch domains for later, computers if needed
             self.pdc.prefetch_info('objectprops' in collect, 'acl' in collect, cache_computers=do_computer_enum)
             # Initialize enumerator
             membership_enum = MembershipEnumerator(self.ad, self.pdc, collect, disable_pooling)
-            membership_enum.do_container_collection(timestamp=timestamp)
+            membership_enum.do_container_collection(timestamp=timestamp, state=state)
         elif do_computer_enum:
             # We need to know which computers to query regardless
             # We also need the domains to have a mapping from NETBIOS -> FQDN for local admins
@@ -93,13 +137,21 @@ class BloodHound(object):
             # Prefetch domains
             self.pdc.get_domains('acl' in collect)
         if 'trusts' in collect or 'acl' in collect or 'objectprops' in collect:
-            trusts_enum = DomainEnumerator(self.ad, self.pdc)
-            trusts_enum.dump_domain(collect,timestamp=timestamp,fileNamePrefix=fileNamePrefix)
+            if not state.is_done('domains'):
+                trusts_enum = DomainEnumerator(self.ad, self.pdc)
+                trusts_enum.dump_domain(collect,timestamp=timestamp,fileNamePrefix=fileNamePrefix)
+                state.mark_done('domains')
+            else:
+                logging.info('Skipping domains/trusts (already completed)')
         if do_computer_enum:
-            # If we don't have a GC server, don't use it for deconflictation
-            have_gc = len(self.ad.gcs()) > 0
-            computer_enum = ComputerEnumerator(self.ad, self.pdc, collect, do_gc_lookup=have_gc, computerfile=computerfile, exclude_dcs=exclude_dcs)
-            computer_enum.enumerate_computers(self.ad.computers, num_workers=num_workers, timestamp=timestamp, fileNamePrefix=fileNamePrefix)
+            if not state.is_done('computers_enum'):
+                # If we don't have a GC server, don't use it for deconflictation
+                have_gc = len(self.ad.gcs()) > 0
+                computer_enum = ComputerEnumerator(self.ad, self.pdc, collect, do_gc_lookup=have_gc, computerfile=computerfile, exclude_dcs=exclude_dcs)
+                computer_enum.enumerate_computers(self.ad.computers, num_workers=num_workers, timestamp=timestamp, fileNamePrefix=fileNamePrefix)
+                state.mark_done('computers_enum')
+            else:
+                logging.info('Skipping computer enumeration (already completed)')
         end_time = time.time()
         minutes, seconds = divmod(int(end_time-start_time),60)
         logging.info('Done in %02dM %02dS' % (minutes, seconds))
@@ -257,6 +309,11 @@ def main():
     coopts.add_argument('--cachefile',
                         action='store',
                         help='Cache file (experimental)')
+    coopts.add_argument('--state-file',
+                        action='store',
+                        metavar='FILE',
+                        help='State file for resume support. If the file exists, completed '
+                             'collection phases are skipped. Use to resume after a crash.')
     coopts.add_argument('--ldap-channel-binding',
                         action='store_true',
                         help='Use LDAP Channel Binding (will force ldaps protocol to be used)')
@@ -343,8 +400,16 @@ def main():
         else:
             auth.get_tgt()
 
-    # For adding timestamp prefix to the outputfiles 
-    timestamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y%m%d%H%M%S') + "_"
+    # Set up collection state for resume support
+    state = CollectionState(args.state_file)
+    if state.timestamp:
+        timestamp = state.timestamp
+        logging.info('Resuming with timestamp: %s', timestamp.rstrip('_'))
+    else:
+        timestamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y%m%d%H%M%S') + "_"
+        state.timestamp = timestamp
+        state._save()
+
     bloodhound = BloodHound(ad)
     bloodhound.connect()
     bloodhound.run(collect=collect,
@@ -354,7 +419,8 @@ def main():
                    computerfile=args.computerfile,
                    cachefile=args.cachefile,
                    exclude_dcs=args.exclude_dcs,
-                   fileNamePrefix=args.outputprefix)
+                   fileNamePrefix=args.outputprefix,
+                   state=state)
     #If args --zip is true, the compress output  
     if args.zip:
         logging.info("Compressing output into " + timestamp + "bloodhound.zip")

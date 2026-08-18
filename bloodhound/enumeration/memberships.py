@@ -854,21 +854,55 @@ class MembershipEnumerator(object):
         }
         self.result_q.put(iugroup)
 
-    def do_container_collection(self, timestamp="", fileNamePrefix=""):
-        self.enumerate_gpos(timestamp, fileNamePrefix)
-        self.enumerate_ous(timestamp, fileNamePrefix)
-        self.enumerate_containers(timestamp, fileNamePrefix)
+    def do_container_collection(self, timestamp="", fileNamePrefix="", state=None):
+        if state is None or not state.is_done('gpos'):
+            self.enumerate_gpos(timestamp, fileNamePrefix)
+            if state:
+                state.mark_done('gpos')
+        else:
+            logging.info('Skipping GPOs (already completed)')
 
-    def enumerate_memberships(self, timestamp="", fileNamePrefix=""):
+        if state is None or not state.is_done('ous'):
+            self.enumerate_ous(timestamp, fileNamePrefix)
+            if state:
+                state.mark_done('ous')
+        else:
+            logging.info('Skipping OUs (already completed)')
+
+        if state is None or not state.is_done('containers'):
+            self.enumerate_containers(timestamp, fileNamePrefix)
+            if state:
+                state.mark_done('containers')
+        else:
+            logging.info('Skipping containers (already completed)')
+
+    def enumerate_memberships(self, timestamp="", fileNamePrefix="", state=None):
         """
         Run appropriate enumeration tasks
         """
-        self.enumerate_users(timestamp, fileNamePrefix)
-        self.enumerate_groups(timestamp, fileNamePrefix)
+        if state is None or not state.is_done('users'):
+            self.enumerate_users(timestamp, fileNamePrefix)
+            if state:
+                state.mark_done('users')
+        else:
+            logging.info('Skipping users (already completed)')
+
+        if state is None or not state.is_done('groups'):
+            self.enumerate_groups(timestamp, fileNamePrefix)
+            if state:
+                state.mark_done('groups')
+        else:
+            logging.info('Skipping groups (already completed)')
+
         if 'container' in self.collect:
-            self.do_container_collection(timestamp, fileNamePrefix)
+            self.do_container_collection(timestamp, fileNamePrefix, state=state)
         if not ('localadmin' in self.collect
                 or 'session' in self.collect
                 or 'loggedon' in self.collect
                 or 'experimental' in self.collect):
-            self.enumerate_computers_dconly(timestamp, fileNamePrefix)
+            if state is None or not state.is_done('computers_dconly'):
+                self.enumerate_computers_dconly(timestamp, fileNamePrefix)
+                if state:
+                    state.mark_done('computers_dconly')
+            else:
+                logging.info('Skipping computers (already completed)')
