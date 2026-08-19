@@ -7,6 +7,7 @@ Modified for BloodHound.py - NTLM and Kerberos authentication.
 import datetime
 import logging
 import socket
+import threading
 from base64 import b64decode
 from enum import IntFlag
 from typing import Self, Type
@@ -274,6 +275,7 @@ class ADWSConnect:
         self._auth = auth
 
         self._resource: str = resource
+        self._sock: socket.socket | None = None
 
         self._nmf: ms_nmf.NMFConnection = self._connect(self._fqdn, self._resource)
 
@@ -325,7 +327,24 @@ class ADWSConnect:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
+        self._sock = sock
+
         return nmf
+
+    def _deadline_timer(self, timeout: int = 300):
+        """Return a threading.Timer that closes the socket after timeout seconds.
+        Call .start() before the operation and .cancel() after it completes."""
+        def _kill():
+            logging.warning('ADWS operation deadline exceeded (%ds), closing socket', timeout)
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+        return threading.Timer(timeout, _kill)
 
     def _query_enumeration(
         self, remoteName: str, nmf: ms_nmf.NMFConnection, query: str, attributes: list,
@@ -357,8 +376,13 @@ class ADWSConnect:
 
         enumeration = LDAP_QUERY_FSTRING.format(**query_vars)
 
-        nmf.send(enumeration)
-        enumerationResponse = nmf.recv()
+        timer = self._deadline_timer(60)
+        timer.start()
+        try:
+            nmf.send(enumeration)
+            enumerationResponse = nmf.recv()
+        finally:
+            timer.cancel()
 
         et = self._handle_str_to_xml(enumerationResponse)
         if not et:
@@ -388,8 +412,13 @@ class ADWSConnect:
         }
 
         pull = LDAP_PULL_FSTRING.format(**pull_vars)
-        nmf.send(pull)
-        pullResponse = nmf.recv()
+        timer = self._deadline_timer(60)
+        timer.start()
+        try:
+            nmf.send(pull)
+            pullResponse = nmf.recv()
+        finally:
+            timer.cancel()
 
         et = self._handle_str_to_xml(pullResponse)
         if not et:
