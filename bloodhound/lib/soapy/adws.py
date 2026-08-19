@@ -383,11 +383,14 @@ class ADWSConnect:
         }
 
         pull = LDAP_PULL_FSTRING.format(**pull_vars)
-        logging.debug('[ADWS_PULL] Sending pull request (query_sd=%s)...', query_sd)
+        has_controls = bool(controls.strip())
+        logging.debug('[ADWS_PULL] Sending pull request (query_sd=%s, has_controls=%s)...', query_sd, has_controls)
         nmf.send(pull)
         logging.debug('[ADWS_PULL] Waiting for pull response...')
         pullResponse = nmf.recv()
         logging.debug('[ADWS_PULL] Received pull response (%d bytes)', len(pullResponse))
+        if ':Fault>' in pullResponse or ':Reason>' in pullResponse:
+            logging.debug('[ADWS_PULL] FAULT in pull response (query_sd=%s, has_controls=%s): %s', query_sd, has_controls, pullResponse[:2000])
 
         et = self._handle_str_to_xml(pullResponse)
         if not et:
@@ -438,6 +441,8 @@ class ADWSConnect:
         else:
             detail_xmlstr = ""
 
+        logging.debug('[ADWS_FAULT] Reason: %s', base_msg.strip() if base_msg else '(none)')
+        logging.debug('[ADWS_FAULT] Detail: %s', detail_xmlstr[:500] if detail_xmlstr else '(none)')
         raise ADWSError(base_msg + detail_xmlstr)
 
     def _get_tag_name(self, elem: ElementTree.Element) -> str:
@@ -513,18 +518,24 @@ class ADWSConnect:
             )
             raise ValueError("unable to get enumeration context")
 
+        import time as _time
+
         ElementTree.register_namespace("wsen", NAMESPACES["wsen"])
         results: ElementTree.Element = ElementTree.Element("wsen:Items")
         batch_count = 0
         total_items = 0
+        pull_start_time = _time.monotonic()
         more_results = True
         while more_results:
             try:
-                logging.debug('[ADWS_PULL] Pulling batch %d...', batch_count + 1)
+                batch_start = _time.monotonic()
+                logging.debug('[ADWS_PULL] Pulling batch %d (elapsed %.1fs)...', batch_count + 1, batch_start - pull_start_time)
                 et, more_results = self._pull_results(
                     remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
                     query_sd=query_sd,
                 )
+                batch_elapsed = _time.monotonic() - batch_start
+                logging.debug('[ADWS_PULL] Batch %d took %.1fs', batch_count + 1, batch_elapsed)
             except Exception as e:
                 error_str = str(e)
                 if 'does not support the control' in error_str and batch_count == 0:
