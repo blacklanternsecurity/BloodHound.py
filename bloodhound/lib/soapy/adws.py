@@ -365,7 +365,7 @@ class ADWSConnect:
 
     def _pull_results(
         self, remoteName: str, nmf: ms_nmf.NMFConnection, enum_ctx: str,
-        query_sd: bool = False, max_elements: int = 1000,
+        query_sd: bool = False,
     ) -> tuple[ElementTree.Element, bool]:
         """Pull the results of an enumeration ctx from server.
 
@@ -380,7 +380,6 @@ class ADWSConnect:
             "fqdn": remoteName,
             "enum_ctx": enum_ctx,
             "controls": controls,
-            "max_elements": max_elements,
         }
 
         pull = LDAP_PULL_FSTRING.format(**pull_vars)
@@ -495,7 +494,6 @@ class ADWSConnect:
         print_incrementally: bool = False,
         scope: str = "Subtree",
         query_sd: bool = False,
-        max_elements: int = 1000,
     ) -> ElementTree.Element:
         """Makes an LDAP query using ADWS to the specified server.
 
@@ -534,7 +532,7 @@ class ADWSConnect:
                 logging.debug('[ADWS_PULL] Pulling batch %d (elapsed %.1fs)...', batch_count + 1, batch_start - pull_start_time)
                 et, more_results = self._pull_results(
                     remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
-                    query_sd=query_sd, max_elements=max_elements,
+                    query_sd=query_sd,
                 )
                 batch_elapsed = _time.monotonic() - batch_start
                 logging.debug('[ADWS_PULL] Batch %d took %.1fs', batch_count + 1, batch_elapsed)

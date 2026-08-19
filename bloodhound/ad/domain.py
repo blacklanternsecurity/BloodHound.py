@@ -86,8 +86,6 @@ class ADDC(ADComputer):
 
         # Pass FQDN as hostname (needed for Kerberos SPN), resolved IP for TCP
         self._adws_client = ADWSClient(self.hostname, self.ad, target_ip=ip)
-        if hasattr(self.ad, 'adws_max_elements'):
-            self._adws_client.max_elements = self.ad.adws_max_elements
         self._adws_client.connect()
         logging.info('Successfully connected to ADWS')
         return True
@@ -577,73 +575,85 @@ class ADDC(ADComputer):
                 dncache[ADUtils.get_entry_property(lentry, 'distinguishedName').upper()] = cacheitem
         return dncache, sidcache
 
+    def _adws_two_pass(self, query, properties, object_type, search_base=None):
+        """Fetch objects in two passes over ADWS: first without SD_FLAGS
+        to get all objects, then with SD_FLAGS to get security descriptors.
+        Merges the SD data back into the entries by DN."""
+        logging.info('ADWS two-pass %s collection: pass 1 (objects)', object_type)
+        entries = list(self.search(query, properties, generator=True, query_sd=False, search_base=search_base))
+        logging.info('Pass 1 complete: %d %s', len(entries), object_type)
+
+        logging.info('Starting pass 2: fetching security descriptors for %s', object_type)
+        sd_entries = self.search(query,
+                                 ['distinguishedName', 'nTSecurityDescriptor'],
+                                 generator=True,
+                                 query_sd=True,
+                                 search_base=search_base)
+        sd_map = {}
+        for sd_entry in sd_entries:
+            dn = sd_entry.get('dn', '').upper()
+            sd = sd_entry.get('raw_attributes', {}).get('nTSecurityDescriptor')
+            if dn and sd:
+                sd_map[dn] = sd
+        logging.info('Pass 2 complete: %d security descriptors for %s', len(sd_map), object_type)
+
+        for entry in entries:
+            dn = entry.get('dn', '').upper()
+            if dn in sd_map:
+                entry['raw_attributes']['nTSecurityDescriptor'] = sd_map[dn]
+                entry['attributes']['nTSecurityDescriptor'] = sd_map[dn]
+        return entries
+
     def get_groups(self, include_properties=False, acl=False):
         properties = ['distinguishedName', 'samaccountname', 'samaccounttype', 'objectsid', 'member']
         if include_properties:
             properties += ['adminCount', 'description', 'whencreated']
+        query = '(objectClass=group)'
+        if acl and self.use_adws:
+            return self._adws_two_pass(query, properties, 'groups')
         if acl:
             properties += ['nTSecurityDescriptor']
-        entries = self.search('(objectClass=group)',
-                              properties,
-                              generator=True,
-                              query_sd=acl)
+        entries = self.search(query, properties, generator=True, query_sd=acl)
         return entries
 
     def get_gpos(self, include_properties=False, acl=False):
         properties = ['distinguishedName', 'name', 'objectGUID', 'gPCFileSysPath', 'displayName']
         if include_properties:
             properties += ['description', 'whencreated']
+        query = '(objectCategory=groupPolicyContainer)'
+        if acl and self.use_adws:
+            return self._adws_two_pass(query, properties, 'gpos')
         if acl:
             properties += ['nTSecurityDescriptor']
-        entries = self.search('(objectCategory=groupPolicyContainer)',
-                              properties,
-                              generator=True,
-                              query_sd=acl)
+        entries = self.search(query, properties, generator=True, query_sd=acl)
         return entries
 
     def get_ous(self, include_properties=False, acl=False):
         properties = ['distinguishedName', 'name', 'objectGUID', 'gPLink', 'gPOptions']
         if include_properties:
             properties += ['description', 'whencreated']
+        query = '(objectCategory=organizationalUnit)'
+        if acl and self.use_adws:
+            return self._adws_two_pass(query, properties, 'ous')
         if acl:
             properties += ['nTSecurityDescriptor']
-        entries = self.search('(objectCategory=organizationalUnit)',
-                              properties,
-                              generator=True,
-                              query_sd=acl)
+        entries = self.search(query, properties, generator=True, query_sd=acl)
         return entries
 
     def get_containers(self, include_properties=False, acl=False, dn=''):
         properties = ['distinguishedName', 'name', 'objectGUID', 'isCriticalSystemObject','objectClass', 'objectCategory']
         if include_properties:
             properties += ['description', 'whencreated']
+        query = '(&(objectCategory=container)(objectClass=container))'
+        if acl and self.use_adws:
+            return self._adws_two_pass(query, properties, 'containers', search_base=dn)
         if acl:
             properties += ['nTSecurityDescriptor']
-        entries = self.search('(&(objectCategory=container)(objectClass=container))',
-                              properties,
-                              generator=True,
-                              query_sd=acl,
-                              search_base=dn)
+        entries = self.search(query, properties, generator=True, query_sd=acl, search_base=dn)
         return entries
 
-    def get_users(self, include_properties=False, acl=False):
-
-        properties = ['sAMAccountName', 'distinguishedName', 'sAMAccountType',
-                      'objectSid', 'primaryGroupID', 'isDeleted', 'objectClass']
-        if 'ms-DS-GroupMSAMembership'.lower() in self.objecttype_guid_map:
-            properties.append('msDS-GroupMSAMembership')
-
-        if include_properties:
-            properties += ['userAccountControl', 'displayName',
-                           'lastLogon', 'lastLogonTimestamp', 'pwdLastSet', 'mail', 'title', 'homeDirectory',
-                           'description', 'userPassword', 'adminCount', 'msDS-AllowedToDelegateTo', 'sIDHistory',
-                           'whencreated', 'unicodepwd', 'scriptpath']
-            if 'unixuserpassword' in self.objecttype_guid_map:
-                properties.append('unixuserpassword')
-        if acl:
-            properties.append('nTSecurityDescriptor')
-
-        # Query for MSA only if server supports it
+    def _build_user_query(self):
+        """Build the LDAP filter for user enumeration."""
         if self.use_adws:
             has_gmsa = self._adws_client.supports_object_class('msDS-GroupManagedServiceAccount')
             has_smsa = self._adws_client.supports_object_class('msDS-ManagedServiceAccount')
@@ -664,13 +674,31 @@ class ADDC(ADComputer):
             smsa_filter = ''
 
         if gmsa_filter or smsa_filter:
-            query = '(|(&(objectCategory=person)(objectClass=user)){}{})'.format(gmsa_filter, smsa_filter)
-        else:
-            query = '(&(objectCategory=person)(objectClass=user))'
-        entries = self.search(query,
-                              properties,
-                              generator=True,
-                              query_sd=acl)
+            return '(|(&(objectCategory=person)(objectClass=user)){}{})'.format(gmsa_filter, smsa_filter)
+        return '(&(objectCategory=person)(objectClass=user))'
+
+    def get_users(self, include_properties=False, acl=False):
+
+        properties = ['sAMAccountName', 'distinguishedName', 'sAMAccountType',
+                      'objectSid', 'primaryGroupID', 'isDeleted', 'objectClass']
+        if 'ms-DS-GroupMSAMembership'.lower() in self.objecttype_guid_map:
+            properties.append('msDS-GroupMSAMembership')
+
+        if include_properties:
+            properties += ['userAccountControl', 'displayName',
+                           'lastLogon', 'lastLogonTimestamp', 'pwdLastSet', 'mail', 'title', 'homeDirectory',
+                           'description', 'userPassword', 'adminCount', 'msDS-AllowedToDelegateTo', 'sIDHistory',
+                           'whencreated', 'unicodepwd', 'scriptpath']
+            if 'unixuserpassword' in self.objecttype_guid_map:
+                properties.append('unixuserpassword')
+
+        query = self._build_user_query()
+
+        if acl and self.use_adws:
+            return self._adws_two_pass(query, properties, 'users')
+        if acl:
+            properties.append('nTSecurityDescriptor')
+        entries = self.search(query, properties, generator=True, query_sd=acl)
         return entries
 
 
@@ -724,11 +752,11 @@ class ADDC(ADComputer):
         else:
             query = '(&(sAMAccountType=805306369))'
 
-        entries = self.search(query,
-                              properties,
-                              generator=True,
-                              query_sd=acl)
-
+        if acl and self.use_adws:
+            # Remove nTSecurityDescriptor from properties for pass 1
+            props_no_sd = [p for p in properties if p != 'nTSecurityDescriptor']
+            return self._adws_two_pass(query, props_no_sd, 'computers')
+        entries = self.search(query, properties, generator=True, query_sd=acl)
         return entries
 
     def get_computers_withcache(self, include_properties=False, acl=False):

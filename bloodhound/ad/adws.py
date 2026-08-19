@@ -143,7 +143,6 @@ class ADWSClient:
         # callback thread (from the multiprocessing pool's result callback)
         # can interleave requests, corrupting frames and causing server RST.
         self._io_lock = threading.Lock()
-        self.max_elements = 1000
 
     def connect(self) -> None:
         """
@@ -446,7 +445,6 @@ class ADWSClient:
                         search_base=search_base,
                         scope=adws_scope,
                         query_sd=query_sd,
-                        max_elements=self.max_elements,
                     )
 
                 entry_count = 0
