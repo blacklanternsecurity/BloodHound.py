@@ -328,12 +328,25 @@ def main():
                         metavar='PREFIX_NAME',
                         action='store',
                         help='String to prepend to output file names')
+    coopts.add_argument('--log-file',
+                        metavar='FILE',
+                        action='store',
+                        help='Write all log output (including debug) to this file')
 
     args = parser.parse_args()
     logging.info('BloodHound.py for BloodHound Community Edition')
 
     if args.v is True:
         logger.setLevel(logging.DEBUG)
+
+    if args.log_file:
+        file_handler = logging.FileHandler(args.log_file, mode='a', encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
+        logger.setLevel(logging.DEBUG)
+        logging.info('Logging to file: %s', args.log_file)
 
     if args.username is not None and args.password is not None:
         logging.debug('Authentication: username/password')
