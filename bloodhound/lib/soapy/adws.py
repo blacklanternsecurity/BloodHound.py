@@ -7,7 +7,6 @@ Modified for BloodHound.py - NTLM and Kerberos authentication.
 import datetime
 import logging
 import socket
-import threading
 from base64 import b64decode
 from enum import IntFlag
 from typing import Self, Type
@@ -275,7 +274,6 @@ class ADWSConnect:
         self._auth = auth
 
         self._resource: str = resource
-        self._sock: socket.socket | None = None
 
         self._nmf: ms_nmf.NMFConnection = self._connect(self._fqdn, self._resource)
 
@@ -318,33 +316,7 @@ class ADWSConnect:
 
         nmf.connect(f"Windows/{resource}")
 
-        # Re-apply timeout after auth — Kerberos/NTLM negotiation may reset it
-        sock.settimeout(30)
-        # Enable TCP keepalive so dead connections are detected by the OS
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        if hasattr(socket, 'TCP_KEEPIDLE'):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-
-        self._sock = sock
-
         return nmf
-
-    def _deadline_timer(self, timeout: int = 300):
-        """Return a threading.Timer that closes the socket after timeout seconds.
-        Call .start() before the operation and .cancel() after it completes."""
-        def _kill():
-            logging.warning('ADWS operation deadline exceeded (%ds), closing socket', timeout)
-            try:
-                self._sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-        return threading.Timer(timeout, _kill)
 
     def _query_enumeration(
         self, remoteName: str, nmf: ms_nmf.NMFConnection, query: str, attributes: list,
@@ -376,13 +348,8 @@ class ADWSConnect:
 
         enumeration = LDAP_QUERY_FSTRING.format(**query_vars)
 
-        timer = self._deadline_timer(60)
-        timer.start()
-        try:
-            nmf.send(enumeration)
-            enumerationResponse = nmf.recv()
-        finally:
-            timer.cancel()
+        nmf.send(enumeration)
+        enumerationResponse = nmf.recv()
 
         et = self._handle_str_to_xml(enumerationResponse)
         if not et:
@@ -412,13 +379,8 @@ class ADWSConnect:
         }
 
         pull = LDAP_PULL_FSTRING.format(**pull_vars)
-        timer = self._deadline_timer(60)
-        timer.start()
-        try:
-            nmf.send(pull)
-            pullResponse = nmf.recv()
-        finally:
-            timer.cancel()
+        nmf.send(pull)
+        pullResponse = nmf.recv()
 
         et = self._handle_str_to_xml(pullResponse)
         if not et:
@@ -565,47 +527,6 @@ class ADWSConnect:
                     results.append(item)
 
         return results
-
-    def pull_iter(
-        self,
-        query: str,
-        attributes: list,
-        search_base: str | None = None,
-        scope: str = "Subtree",
-        query_sd: bool = False,
-    ):
-        """Like pull(), but yields each batch's XML element instead of
-        collecting everything in memory. Callers should parse and discard
-        each batch to keep memory usage constant."""
-        if self._resource != "Enumeration":
-            raise NotImplementedError("pull_iter is only supported on 'pull' clients")
-
-        enum_ctx = self._query_enumeration(
-            remoteName=self._fqdn,
-            nmf=self._nmf,
-            query=query,
-            attributes=attributes,
-            search_base=search_base,
-            scope=scope,
-        )
-        if enum_ctx is None:
-            raise ValueError("unable to get enumeration context")
-
-        batch_count = 0
-        more_results = True
-        while more_results:
-            try:
-                et, more_results = self._pull_results(
-                    remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
-                    query_sd=query_sd,
-                )
-            except Exception as e:
-                if batch_count > 0:
-                    logging.warning('ADWS connection error after %d batches, returning partial results: %s', batch_count, e)
-                    return
-                raise
-            batch_count += 1
-            yield et
 
     @classmethod
     def pull_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth, target_ip: str | None = None) -> Self:

@@ -411,17 +411,17 @@ class ADWSClient:
         for attempt in range(max_retries + 1):
             try:
                 with self._io_lock:
-                    batch_iter = self._client.pull_iter(
+                    results_xml = self._client.pull(
                         query=search_filter,
                         attributes=attr_list,
                         search_base=search_base,
                         scope=adws_scope,
                         query_sd=query_sd,
                     )
-                    for batch_xml in batch_iter:
-                        for entry in self._parse_xml_entries(batch_xml):
-                            self._complete_ranged_members(entry)
-                            yield entry
+
+                for entry in self._parse_xml_entries(results_xml):
+                    self._complete_ranged_members(entry)
+                    yield entry
                 return
 
             except Exception as e:
