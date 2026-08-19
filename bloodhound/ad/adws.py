@@ -468,7 +468,7 @@ class ADWSClient:
                     logging.debug('ADWS server busy, retrying in %ds (%d/%d)', wait, attempt + 1, max_retries)
                     time.sleep(wait)
                     continue
-                if ('Connection closed' in error_str or 'ConnectionError' in error_str) and attempt < max_retries:
+                if any(s in error_str for s in ('Connection closed', 'Broken pipe', 'ConnectionError', 'ConnectionReset')) and attempt < max_retries:
                     logging.debug('ADWS connection lost, reconnecting (%d/%d)', attempt + 1, max_retries)
                     with self._io_lock:
                         self.reconnect()
@@ -526,7 +526,7 @@ class ADWSClient:
                     logging.debug('ADWS server busy, retrying get_single in %ds (%d/%d)', wait, attempt + 1, max_retries)
                     time.sleep(wait)
                     continue
-                if ('Connection closed' in error_str or 'ConnectionError' in error_str) and attempt < max_retries:
+                if any(s in error_str for s in ('Connection closed', 'Broken pipe', 'ConnectionError', 'ConnectionReset')) and attempt < max_retries:
                     logging.debug('ADWS get_single connection lost, reconnecting (%d/%d)', attempt + 1, max_retries)
                     with self._io_lock:
                         self.reconnect()
