@@ -86,6 +86,8 @@ class ADDC(ADComputer):
 
         # Pass FQDN as hostname (needed for Kerberos SPN), resolved IP for TCP
         self._adws_client = ADWSClient(self.hostname, self.ad, target_ip=ip)
+        if hasattr(self.ad, 'adws_max_elements'):
+            self._adws_client.max_elements = self.ad.adws_max_elements
         self._adws_client.connect()
         logging.info('Successfully connected to ADWS')
         return True

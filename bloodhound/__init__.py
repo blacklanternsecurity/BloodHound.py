@@ -323,6 +323,11 @@ def main():
     coopts.add_argument('--use-adws',
                         action='store_true',
                         help='Use ADWS (port 9389) instead of LDAP for DC queries. No LDAP fallback.')
+    coopts.add_argument('--adws-batch-size',
+                        type=int,
+                        default=1000,
+                        metavar='N',
+                        help='MaxElements per ADWS pull batch (default: 1000). Larger values mean fewer round-trips but bigger responses.')
     coopts.add_argument('-op',
                         '--outputprefix',
                         metavar='PREFIX_NAME',
@@ -377,6 +382,8 @@ def main():
             auth = ADAuthentication(username=args.username, password=args.password, domain=args.domain, auth_method=args.auth_method, ldap_channel_binding=args.ldap_channel_binding)
 
     ad = AD(auth=auth, domain=args.domain, nameserver=args.nameserver, dns_tcp=args.dns_tcp, dns_timeout=args.dns_timeout, use_ldaps=args.use_ldaps, use_adws=args.use_adws)
+    if args.use_adws and args.adws_batch_size:
+        ad.adws_max_elements = args.adws_batch_size
     # Resolve collection methods
     collect = resolve_collection_methods(args.collectionmethod)
     if not collect:
