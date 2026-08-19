@@ -183,6 +183,32 @@ class ADWSClient:
 
         self._resolve_base_dn()
 
+    def reconnect(self) -> bool:
+        """Re-establish the ADWS connection after a failure."""
+        logging.info('Reconnecting to ADWS...')
+        auth = self.ad.auth
+        if auth.tgt is not None:
+            adws_auth = KerberosAuth(tgt=auth.tgt, domain=auth.domain, kdc=auth.kdc)
+        elif auth.nt_hash:
+            adws_auth = NTLMAuth(hashes=auth.nt_hash)
+        elif auth.password:
+            adws_auth = NTLMAuth(password=auth.password)
+        else:
+            return False
+        try:
+            self._client = ADWSConnect.pull_client(
+                ip=self.hostname,
+                domain=self.ad.domain,
+                username=auth.username,
+                auth=adws_auth,
+                target_ip=self.target_ip,
+            )
+            logging.info('ADWS reconnection successful')
+            return True
+        except Exception as e:
+            logging.error('ADWS reconnection failed: %s', e)
+            return False
+
     def _discover_configuration_from_domain(self) -> None:
         """Discover the Configuration partition DN from the domain object.
 
@@ -432,10 +458,20 @@ class ADWSClient:
                         attr_list.remove('nTSecurityDescriptor')
                     query_sd = False
                     continue
+                if 'timed out' in error_str and attempt < max_retries:
+                    logging.debug('ADWS connection timed out, reconnecting (%d/%d)', attempt + 1, max_retries)
+                    with self._io_lock:
+                        self.reconnect()
+                    continue
                 if 'NoConnectionAvailable' in error_str and attempt < max_retries:
                     wait = 2 ** attempt
                     logging.debug('ADWS server busy, retrying in %ds (%d/%d)', wait, attempt + 1, max_retries)
                     time.sleep(wait)
+                    continue
+                if ('Connection closed' in error_str or 'ConnectionError' in error_str) and attempt < max_retries:
+                    logging.debug('ADWS connection lost, reconnecting (%d/%d)', attempt + 1, max_retries)
+                    with self._io_lock:
+                        self.reconnect()
                     continue
                 logging.warning('ADWS search %r failed: %s', search_filter, e)
 
@@ -479,10 +515,21 @@ class ADWSClient:
                 return None
 
             except Exception as e:
-                if 'NoConnectionAvailable' in str(e) and attempt < max_retries:
+                error_str = str(e)
+                if 'timed out' in error_str and attempt < max_retries:
+                    logging.debug('ADWS get_single timed out, reconnecting (%d/%d)', attempt + 1, max_retries)
+                    with self._io_lock:
+                        self.reconnect()
+                    continue
+                if 'NoConnectionAvailable' in error_str and attempt < max_retries:
                     wait = 2 ** attempt
                     logging.debug('ADWS server busy, retrying get_single in %ds (%d/%d)', wait, attempt + 1, max_retries)
                     time.sleep(wait)
+                    continue
+                if ('Connection closed' in error_str or 'ConnectionError' in error_str) and attempt < max_retries:
+                    logging.debug('ADWS get_single connection lost, reconnecting (%d/%d)', attempt + 1, max_retries)
+                    with self._io_lock:
+                        self.reconnect()
                     continue
                 logging.warning('ADWS get_single %r failed: %s', dn, e)
                 return None
