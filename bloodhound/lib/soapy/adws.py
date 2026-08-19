@@ -527,11 +527,11 @@ class ADWSConnect:
                 )
             except Exception as e:
                 error_str = str(e)
-                if 'does not support the control' in error_str:
-                    logging.warning('[ADWS_PULL] Server rejected control mid-stream after %d batches (%d items), re-raising for retry', batch_count, total_items)
+                if 'does not support the control' in error_str and batch_count == 0:
+                    logging.warning('[ADWS_PULL] Server rejected control on first batch, re-raising for retry')
                     raise
                 if batch_count > 0:
-                    logging.warning('[ADWS_PULL] Connection error after %d batches (%d items), returning partial results: %s', batch_count, total_items, e)
+                    logging.warning('[ADWS_PULL] Error after %d batches (%d items), returning partial results: %s', batch_count, total_items, e)
                     break
                 logging.warning('[ADWS_PULL] Connection error on first batch: %s', e)
                 raise
