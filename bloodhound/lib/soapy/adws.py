@@ -316,6 +316,15 @@ class ADWSConnect:
 
         nmf.connect(f"Windows/{resource}")
 
+        # Re-apply timeout after auth — Kerberos/NTLM negotiation may reset it
+        sock.settimeout(30)
+        # Enable TCP keepalive so dead connections are detected by the OS
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, 'TCP_KEEPIDLE'):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+
         return nmf
 
     def _query_enumeration(
