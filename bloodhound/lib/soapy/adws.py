@@ -31,6 +31,7 @@ from .soap_templates import (
     LDAP_PULL_FSTRING,
     LDAP_PUT_FSTRING,
     LDAP_QUERY_FSTRING,
+    LDAP_RELEASE_FSTRING,
     NAMESPACES,
     SD_FLAGS_CONTROL_XML,
 )
@@ -404,6 +405,20 @@ class ADWSConnect:
 
         return (et, True)
 
+    def _release_enumeration(self, remoteName: str, nmf: ms_nmf.NMFConnection, enum_ctx: str) -> None:
+        """Send a WS-Enumeration Release to free the server-side enumeration context."""
+        try:
+            release = LDAP_RELEASE_FSTRING.format(
+                uuid=str(uuid4()),
+                fqdn=remoteName,
+                enum_ctx=enum_ctx,
+            )
+            nmf.send(release)
+            nmf.recv()
+            logging.debug('[ADWS_PULL] Released enumeration context')
+        except Exception as e:
+            logging.debug('[ADWS_PULL] Failed to release enumeration context: %s', e)
+
     def _handle_str_to_xml(self, xmlstr: str) -> ElementTree.Element | None:
         """Takes an xml string and returns an Element of the root node."""
         if ":Fault>" not in xmlstr and ":Reason>" not in xmlstr:
@@ -538,6 +553,7 @@ class ADWSConnect:
                 logging.debug('[ADWS_PULL] Batch %d took %.1fs', batch_count + 1, batch_elapsed)
             except Exception as e:
                 error_str = str(e)
+                self._release_enumeration(self._fqdn, self._nmf, enum_ctx)
                 if 'does not support the control' in error_str and batch_count == 0:
                     logging.warning('[ADWS_PULL] Server rejected control on first batch, re-raising for retry')
                     raise

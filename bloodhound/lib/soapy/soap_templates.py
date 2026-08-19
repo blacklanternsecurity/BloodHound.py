@@ -87,6 +87,26 @@ SD_FLAGS_CONTROL_XML = (
 )
 
 
+LDAP_RELEASE_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+    xmlns:a="http://www.w3.org/2005/08/addressing"
+    xmlns:ad="http://schemas.microsoft.com/2008/1/ActiveDirectory">
+    <s:Header>
+        <a:Action s:mustUnderstand="1">http://schemas.xmlsoap.org/ws/2004/09/enumeration/Release</a:Action>
+        <ad:instance>ldap:389</ad:instance>
+        <a:MessageID>urn:uuid:{uuid}</a:MessageID>
+        <a:ReplyTo>
+            <a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address>
+        </a:ReplyTo>
+        <a:To s:mustUnderstand="1">net.tcp://{fqdn}:9389/ActiveDirectoryWebServices/Windows/Enumeration</a:To>
+    </s:Header>
+    <s:Body xmlns:wsen="http://schemas.xmlsoap.org/ws/2004/09/enumeration">
+        <wsen:Release>
+            <wsen:EnumerationContext>{enum_ctx}</wsen:EnumerationContext>
+        </wsen:Release>
+    </s:Body>
+</s:Envelope>"""
+
+
 LDAP_PUT_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
         xmlns:a="http://www.w3.org/2005/08/addressing"
         xmlns:addata="http://schemas.microsoft.com/2008/1/ActiveDirectory/Data"
