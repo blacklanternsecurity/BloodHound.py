@@ -526,6 +526,10 @@ class ADWSConnect:
                     query_sd=query_sd,
                 )
             except Exception as e:
+                error_str = str(e)
+                if 'does not support the control' in error_str:
+                    logging.warning('[ADWS_PULL] Server rejected control mid-stream after %d batches (%d items), re-raising for retry', batch_count, total_items)
+                    raise
                 if batch_count > 0:
                     logging.warning('[ADWS_PULL] Connection error after %d batches (%d items), returning partial results: %s', batch_count, total_items, e)
                     break
