@@ -575,20 +575,108 @@ class ADDC(ADComputer):
                 dncache[ADUtils.get_entry_property(lentry, 'distinguishedName').upper()] = cacheitem
         return dncache, sidcache
 
+    # Characters used for AutoSplit prefix sharding
+    _AUTOSPLIT_CHARS = list('abcdefghijklmnopqrstuvwxyz0123456789')
+
+    def _adws_autosplit_search(self, base_query, attributes, object_type, query_sd=False, search_base=None):
+        """Fetch objects with automatic query splitting when the server's
+        ADWS connection pool is exhausted.
+
+        First attempts the full query. If partial results are returned
+        (server error mid-stream), splits into sub-queries by CN prefix
+        (cn=a*, cn=b*, ...) with a delay between each. If a prefix still
+        fails, subdivides further (cn=aa*, cn=ab*, ...).
+        """
+        entries = list(self.search(base_query, attributes, generator=True,
+                                   query_sd=query_sd, search_base=search_base))
+
+        # Check if we got a complete result by attempting a count query
+        # If the pull completed without error, results are complete
+        # We detect partial results via the warning log, but the simplest
+        # check: try the query once; if it errors we need to split
+        # Since search() already returns partial results on error, we
+        # always try the full query first. If it's partial, we split.
+        #
+        # Heuristic: if result count is a clean multiple of 1000 (batch size),
+        # the pull likely hit an error boundary. Not perfect but practical.
+        if len(entries) > 0 and len(entries) % 1000 == 0:
+            logging.info('[AUTOSPLIT] %s query returned exactly %d results (likely partial), splitting by CN prefix',
+                         object_type, len(entries))
+            return self._split_by_prefix(base_query, attributes, object_type,
+                                         query_sd=query_sd, search_base=search_base,
+                                         prefixes=[''])
+        return entries
+
+    def _split_by_prefix(self, base_query, attributes, object_type, query_sd=False,
+                         search_base=None, prefixes=None, depth=0):
+        """Recursively split a query by CN prefix to stay under server limits."""
+        import time as _time
+
+        if depth > 2:
+            logging.warning('[AUTOSPLIT] Max split depth reached, returning what we have')
+            return []
+
+        all_entries = []
+        chars = self._AUTOSPLIT_CHARS
+        parent_prefix = prefixes[0] if prefixes else ''
+
+        for char in chars:
+            prefix = parent_prefix + char
+            # Wrap base query with CN prefix filter
+            if base_query.startswith('(&'):
+                split_query = '(&(cn=%s*)%s' % (prefix, base_query[2:])
+            elif base_query.startswith('(|'):
+                split_query = '(&(cn=%s*)%s)' % (prefix, base_query)
+            else:
+                split_query = '(&(cn=%s*)%s)' % (prefix, base_query)
+
+            logging.debug('[AUTOSPLIT] Querying %s with prefix cn=%s* (depth=%d)', object_type, prefix, depth)
+
+            # Small delay between sub-queries to let the server's connection pool recover
+            if char != chars[0]:
+                _time.sleep(0.5)
+
+            sub_entries = list(self.search(split_query, attributes, generator=True,
+                                          query_sd=query_sd, search_base=search_base))
+
+            if len(sub_entries) > 0 and len(sub_entries) % 1000 == 0:
+                logging.info('[AUTOSPLIT] Prefix cn=%s* returned %d results (likely partial), subdividing',
+                             prefix, len(sub_entries))
+                _time.sleep(2)
+                sub_entries = self._split_by_prefix(base_query, attributes, object_type,
+                                                    query_sd=query_sd, search_base=search_base,
+                                                    prefixes=[prefix], depth=depth + 1)
+
+            all_entries.extend(sub_entries)
+            if len(sub_entries) > 0:
+                logging.debug('[AUTOSPLIT] Prefix cn=%s*: %d results (total so far: %d)',
+                              prefix, len(sub_entries), len(all_entries))
+
+        logging.info('[AUTOSPLIT] Split complete for %s (depth=%d): %d total results', object_type, depth, len(all_entries))
+        return all_entries
+
     def _adws_two_pass(self, query, properties, object_type, search_base=None):
-        """Fetch objects in two passes over ADWS: first without SD_FLAGS
-        to get all objects, then with SD_FLAGS to get security descriptors.
-        Merges the SD data back into the entries by DN."""
+        """Fetch objects in two passes over ADWS with automatic query splitting.
+
+        Pass 1: Fetch all objects without SD_FLAGS, splitting if needed.
+        Pass 2: Fetch security descriptors with SD_FLAGS, splitting if needed.
+        Merges SD data back into entries by DN.
+        """
+        import time as _time
+
         logging.info('ADWS two-pass %s collection: pass 1 (objects)', object_type)
-        entries = list(self.search(query, properties, generator=True, query_sd=False, search_base=search_base))
+        entries = self._adws_autosplit_search(query, properties, object_type,
+                                              query_sd=False, search_base=search_base)
         logging.info('Pass 1 complete: %d %s', len(entries), object_type)
 
+        # Let the server recover between passes
+        _time.sleep(2)
+
         logging.info('Starting pass 2: fetching security descriptors for %s', object_type)
-        sd_entries = self.search(query,
-                                 ['distinguishedName', 'nTSecurityDescriptor'],
-                                 generator=True,
-                                 query_sd=True,
-                                 search_base=search_base)
+        sd_entries = self._adws_autosplit_search(query,
+                                                 ['distinguishedName', 'nTSecurityDescriptor'],
+                                                 object_type + '_sd',
+                                                 query_sd=True, search_base=search_base)
         sd_map = {}
         for sd_entry in sd_entries:
             dn = sd_entry.get('dn', '').upper()
