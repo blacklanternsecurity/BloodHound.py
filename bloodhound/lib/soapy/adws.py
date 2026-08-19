@@ -348,14 +348,18 @@ class ADWSConnect:
 
         enumeration = LDAP_QUERY_FSTRING.format(**query_vars)
 
+        logging.debug('[ADWS_PULL] Sending enumeration request: query=%s, base=%s, scope=%s', query, search_base, scope)
         nmf.send(enumeration)
+        logging.debug('[ADWS_PULL] Waiting for enumeration response...')
         enumerationResponse = nmf.recv()
+        logging.debug('[ADWS_PULL] Received enumeration response (%d bytes)', len(enumerationResponse))
 
         et = self._handle_str_to_xml(enumerationResponse)
         if not et:
             raise ValueError("was unable to parse xml from the server response")
 
         enum_ctx = et.find(".//wsen:EnumerationContext", NAMESPACES)
+        logging.debug('[ADWS_PULL] Got enumeration context: %s', enum_ctx.text if enum_ctx is not None else 'None')
 
         return enum_ctx.text if enum_ctx is not None else None
 
@@ -379,14 +383,19 @@ class ADWSConnect:
         }
 
         pull = LDAP_PULL_FSTRING.format(**pull_vars)
+        logging.debug('[ADWS_PULL] Sending pull request (query_sd=%s)...', query_sd)
         nmf.send(pull)
+        logging.debug('[ADWS_PULL] Waiting for pull response...')
         pullResponse = nmf.recv()
+        logging.debug('[ADWS_PULL] Received pull response (%d bytes)', len(pullResponse))
 
         et = self._handle_str_to_xml(pullResponse)
         if not et:
             raise ValueError("was unable to parse xml from the server response")
 
         final_pkt = et.find(".//wsen:EndOfSequence", namespaces=NAMESPACES)
+        items = et.findall(".//wsen:Items/*", namespaces=NAMESPACES)
+        logging.debug('[ADWS_PULL] Batch contains %d items, end_of_sequence=%s', len(items), final_pkt is not None)
         if final_pkt is not None:
             return (et, False)
 
@@ -507,25 +516,31 @@ class ADWSConnect:
         ElementTree.register_namespace("wsen", NAMESPACES["wsen"])
         results: ElementTree.Element = ElementTree.Element("wsen:Items")
         batch_count = 0
+        total_items = 0
         more_results = True
         while more_results:
             try:
+                logging.debug('[ADWS_PULL] Pulling batch %d...', batch_count + 1)
                 et, more_results = self._pull_results(
                     remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
                     query_sd=query_sd,
                 )
             except Exception as e:
                 if batch_count > 0:
-                    logging.warning('ADWS connection error after %d batches, returning partial results: %s', batch_count, e)
+                    logging.warning('[ADWS_PULL] Connection error after %d batches (%d items), returning partial results: %s', batch_count, total_items, e)
                     break
+                logging.warning('[ADWS_PULL] Connection error on first batch: %s', e)
                 raise
             batch_count += 1
-            if len(et.findall(".//wsen:Items", namespaces=NAMESPACES)) == 0:
-                logging.debug("No objects returned in this batch")
+            batch_items = et.findall(".//wsen:Items", namespaces=NAMESPACES)
+            if len(batch_items) == 0:
+                logging.debug("[ADWS_PULL] No objects returned in batch %d", batch_count)
             else:
-                for item in et.findall(".//wsen:Items", namespaces=NAMESPACES):
+                for item in batch_items:
                     results.append(item)
+                    total_items += len(item)
 
+        logging.debug('[ADWS_PULL] Pull complete: %d batches, %d total items', batch_count, total_items)
         return results
 
     @classmethod

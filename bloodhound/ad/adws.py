@@ -436,6 +436,8 @@ class ADWSClient:
         max_retries = 3
         for attempt in range(max_retries + 1):
             try:
+                if attempt > 0:
+                    logging.debug('[ADWS_SEARCH] Attempt %d/%d for filter=%s', attempt + 1, max_retries + 1, search_filter)
                 with self._io_lock:
                     results_xml = self._client.pull(
                         query=search_filter,
@@ -445,9 +447,12 @@ class ADWSClient:
                         query_sd=query_sd,
                     )
 
+                entry_count = 0
                 for entry in self._parse_xml_entries(results_xml):
                     self._complete_ranged_members(entry)
+                    entry_count += 1
                     yield entry
+                logging.debug('[ADWS_SEARCH] Yielded %d entries for filter=%s', entry_count, search_filter)
                 return
 
             except Exception as e:
