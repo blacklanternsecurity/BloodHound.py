@@ -301,6 +301,9 @@ class ADDC(ADComputer):
                 searcher = self.ldap
 
         hadresults = False
+        result_count = 0
+        logging.debug('[LDAP] Search: filter=%s, base=%s, scope=%s, query_sd=%s, paged_size=200',
+                      search_filter, search_base, search_scope, query_sd)
         sresult = searcher.extend.standard.paged_search(search_base,
                                                         search_filter,
                                                         attributes=attributes,
@@ -309,34 +312,28 @@ class ADDC(ADComputer):
                                                         controls=controls,
                                                         generator=generator)
         try:
-            # Use a generator for the result regardless of if the search function uses one
             for e in sresult:
                 if e['type'] != 'searchResEntry':
                     continue
                 if not hadresults:
                     hadresults = True
+                result_count += 1
                 yield e
+            logging.debug('[LDAP] Search complete: %d results for filter=%s', result_count, search_filter)
         except LDAPNoSuchObjectResult:
-            # This may indicate the object doesn't exist or access is denied
             logging.warning('LDAP Server reported that the search in %s for %s does not exist.', search_base, search_filter)
         except (LDAPSocketReceiveError, LDAPSocketSendError, LDAPCommunicationError) as e:
+            logging.warning('[LDAP] Connection lost after %d results for filter=%s: %s', result_count, search_filter, e)
             if is_retry:
-                logging.error('Connection to LDAP server lost during data gathering - reconnect failed - giving up on query %s', search_filter)
+                logging.error('[LDAP] Reconnect retry also failed - giving up on query %s (%d results returned)', search_filter, result_count)
             else:
-                if hadresults:
-                    logging.error('Connection to LDAP server lost during data gathering. Query was cut short. Data may be inaccurate for query %s', search_filter)
-                    if use_gc:
-                        self.gc_connect()
-                    else:
-                        self.ldap_connect(resolver=use_resolver)
+                logging.warning('[LDAP] Re-establishing connection with server')
+                if use_gc:
+                    self.gc_connect()
                 else:
-                    logging.warning('Re-establishing connection with server')
-                    if use_gc:
-                        self.gc_connect()
-                    else:
-                        self.ldap_connect(resolver=use_resolver)
-                    # Try again
-                    yield from self.search(search_filter, attributes, search_base, generator, use_gc, use_resolver, query_sd, is_retry=True)
+                    self.ldap_connect(resolver=use_resolver)
+                logging.info('[LDAP] Retrying query %s (had %d results before disconnect)', search_filter, result_count)
+                yield from self.search(search_filter, attributes, search_base, generator, use_gc, use_resolver, query_sd, is_retry=True)
 
 
     def ldap_get_single(self, qobject, attributes=None, use_gc=False, use_resolver=False, is_retry=False):
