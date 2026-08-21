@@ -576,33 +576,29 @@ class ADDC(ADComputer):
     _AUTOSPLIT_CHARS = list('abcdefghijklmnopqrstuvwxyz0123456789')
 
     def _adws_autosplit_search(self, base_query, attributes, object_type, query_sd=False, search_base=None):
-        """Fetch objects with automatic query splitting when the server's
-        ADWS connection pool is exhausted.
-
-        First attempts the full query. If partial results are returned
-        (server error mid-stream), splits into sub-queries by CN prefix
-        (cn=a*, cn=b*, ...) with a delay between each. If a prefix still
-        fails, subdivides further (cn=aa*, cn=ab*, ...).
-        """
-        entries = list(self.search(base_query, attributes, generator=True,
-                                   query_sd=query_sd, search_base=search_base))
-
-        # Check if we got a complete result by attempting a count query
-        # If the pull completed without error, results are complete
-        # We detect partial results via the warning log, but the simplest
-        # check: try the query once; if it errors we need to split
-        # Since search() already returns partial results on error, we
-        # always try the full query first. If it's partial, we split.
-        #
-        # Heuristic: if result count is a clean multiple of 1000 (batch size),
-        # the pull likely hit an error boundary. Not perfect but practical.
-        if len(entries) > 0 and len(entries) % 1000 == 0:
-            logging.info('[AUTOSPLIT] %s query returned exactly %d results (likely partial), splitting by CN prefix',
-                         object_type, len(entries))
-            return self._split_by_prefix(base_query, attributes, object_type,
-                                         query_sd=query_sd, search_base=search_base,
-                                         prefixes=[''])
+        """Fetch objects with automatic query splitting. Returns a list.
+        Used for the SD pass where we need the full result set as a dict."""
+        entries = list(self._adws_autosplit_search_iter(base_query, attributes, object_type,
+                                                        query_sd=query_sd, search_base=search_base))
         return entries
+
+    def _adws_autosplit_search_iter(self, base_query, attributes, object_type, query_sd=False, search_base=None):
+        """Streaming version: yields entries one at a time. Splits by CN
+        prefix if the server's connection pool is exhausted mid-query."""
+        count = 0
+        for entry in self.search(base_query, attributes, generator=True,
+                                 query_sd=query_sd, search_base=search_base):
+            count += 1
+            yield entry
+
+        # Heuristic: if count is a clean multiple of 256 (batch size),
+        # the pull likely hit an error boundary. Split and re-fetch.
+        if count > 0 and count % 256 == 0:
+            logging.info('[AUTOSPLIT] %s query returned exactly %d results (likely partial), splitting by CN prefix',
+                         object_type, count)
+            yield from self._split_by_prefix_iter(base_query, attributes, object_type,
+                                                   query_sd=query_sd, search_base=search_base,
+                                                   prefixes=[''])
 
     def _split_by_prefix(self, base_query, attributes, object_type, query_sd=False,
                          search_base=None, prefixes=None, depth=0):
@@ -614,12 +610,27 @@ class ADDC(ADComputer):
             return []
 
         all_entries = []
+        for entry in self._split_by_prefix_iter(base_query, attributes, object_type,
+                                                 query_sd=query_sd, search_base=search_base,
+                                                 prefixes=prefixes, depth=depth):
+            all_entries.append(entry)
+        return all_entries
+
+    def _split_by_prefix_iter(self, base_query, attributes, object_type, query_sd=False,
+                              search_base=None, prefixes=None, depth=0):
+        """Streaming version of prefix splitting. Yields entries one at a time."""
+        import time as _time
+
+        if depth > 2:
+            logging.warning('[AUTOSPLIT] Max split depth reached')
+            return
+
         chars = self._AUTOSPLIT_CHARS
         parent_prefix = prefixes[0] if prefixes else ''
+        total = 0
 
         for char in chars:
             prefix = parent_prefix + char
-            # Wrap base query with CN prefix filter
             if base_query.startswith('(&'):
                 split_query = '(&(cn=%s*)%s' % (prefix, base_query[2:])
             elif base_query.startswith('(|'):
@@ -629,47 +640,47 @@ class ADDC(ADComputer):
 
             logging.debug('[AUTOSPLIT] Querying %s with prefix cn=%s* (depth=%d)', object_type, prefix, depth)
 
-            # Small delay between sub-queries to let the server's connection pool recover
             if char != chars[0]:
                 _time.sleep(0.5)
 
-            sub_entries = list(self.search(split_query, attributes, generator=True,
-                                          query_sd=query_sd, search_base=search_base))
+            sub_count = 0
+            for entry in self.search(split_query, attributes, generator=True,
+                                     query_sd=query_sd, search_base=search_base):
+                sub_count += 1
+                total += 1
+                yield entry
 
-            if len(sub_entries) > 0 and len(sub_entries) % 1000 == 0:
+            if sub_count > 0 and sub_count % 256 == 0:
                 logging.info('[AUTOSPLIT] Prefix cn=%s* returned %d results (likely partial), subdividing',
-                             prefix, len(sub_entries))
+                             prefix, sub_count)
                 _time.sleep(2)
-                sub_entries = self._split_by_prefix(base_query, attributes, object_type,
-                                                    query_sd=query_sd, search_base=search_base,
-                                                    prefixes=[prefix], depth=depth + 1)
-
-            all_entries.extend(sub_entries)
-            if len(sub_entries) > 0:
+                for entry in self._split_by_prefix_iter(base_query, attributes, object_type,
+                                                         query_sd=query_sd, search_base=search_base,
+                                                         prefixes=[prefix], depth=depth + 1):
+                    total += 1
+                    yield entry
+            elif sub_count > 0:
                 logging.debug('[AUTOSPLIT] Prefix cn=%s*: %d results (total so far: %d)',
-                              prefix, len(sub_entries), len(all_entries))
+                              prefix, sub_count, total)
 
-        logging.info('[AUTOSPLIT] Split complete for %s (depth=%d): %d total results', object_type, depth, len(all_entries))
-        return all_entries
+        logging.info('[AUTOSPLIT] Split complete for %s (depth=%d): %d total results', object_type, depth, total)
 
     def _adws_two_pass(self, query, properties, object_type, search_base=None):
         """Fetch objects in two passes over ADWS with automatic query splitting.
 
-        Pass 1: Fetch all objects without SD_FLAGS, splitting if needed.
-        Pass 2: Fetch security descriptors with SD_FLAGS, splitting if needed.
-        Merges SD data back into entries by DN.
+        Pass 1 (SDs first): Fetch security descriptors with SD_FLAGS into a
+            DN->SD lookup dict. Only DNs and SDs are stored (~4KB per object).
+        Pass 2 (objects): Stream all objects without SD_FLAGS, merging SDs
+            from the lookup dict into each entry as it's yielded.
+
+        By fetching SDs first and streaming objects second, peak memory is
+        only the SD map (~200MB for 40k objects) instead of holding both
+        the full object list and the SD map simultaneously (~2.4GB).
         """
         import time as _time
 
-        logging.info('ADWS two-pass %s collection: pass 1 (objects)', object_type)
-        entries = self._adws_autosplit_search(query, properties, object_type,
-                                              query_sd=False, search_base=search_base)
-        logging.info('Pass 1 complete: %d %s', len(entries), object_type)
-
-        # Let the server recover between passes
-        _time.sleep(2)
-
-        logging.info('Starting pass 2: fetching security descriptors for %s', object_type)
+        # Pass 1: fetch security descriptors into a lookup dict
+        logging.info('ADWS %s collection: fetching security descriptors first', object_type)
         sd_entries = self._adws_autosplit_search(query,
                                                  ['distinguishedName', 'nTSecurityDescriptor'],
                                                  object_type + '_sd',
@@ -680,14 +691,24 @@ class ADDC(ADComputer):
             sd = sd_entry.get('raw_attributes', {}).get('nTSecurityDescriptor')
             if dn and sd:
                 sd_map[dn] = sd
-        logging.info('Pass 2 complete: %d security descriptors for %s', len(sd_map), object_type)
+        logging.info('Security descriptors fetched: %d for %s', len(sd_map), object_type)
+        del sd_entries
 
-        for entry in entries:
+        _time.sleep(2)
+
+        # Pass 2: stream objects, merging SDs on the fly
+        logging.info('ADWS %s collection: streaming objects', object_type)
+        entry_count = 0
+        for entry in self._adws_autosplit_search_iter(query, properties, object_type,
+                                                       query_sd=False, search_base=search_base):
             dn = entry.get('dn', '').upper()
             if dn in sd_map:
                 entry['raw_attributes']['nTSecurityDescriptor'] = sd_map[dn]
                 entry['attributes']['nTSecurityDescriptor'] = sd_map[dn]
-        return entries
+            entry_count += 1
+            yield entry
+        logging.info('ADWS %s collection complete: %d objects, %d with security descriptors',
+                     object_type, entry_count, len(sd_map))
 
     def get_groups(self, include_properties=False, acl=False):
         properties = ['distinguishedName', 'samaccountname', 'samaccounttype', 'objectsid', 'member']

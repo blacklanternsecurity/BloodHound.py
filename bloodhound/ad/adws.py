@@ -438,25 +438,54 @@ class ADWSClient:
             try:
                 if attempt > 0:
                     logging.debug('[ADWS_SEARCH] Attempt %d/%d for filter=%s', attempt + 1, max_retries + 1, search_filter)
+
+                # Enumerate: get the enumeration context (lock held only for this round-trip)
                 with self._io_lock:
-                    results_xml = self._client.pull(
+                    enum_ctx = self._client._query_enumeration(
+                        remoteName=self._client._fqdn,
+                        nmf=self._client._nmf,
                         query=search_filter,
                         attributes=attr_list,
                         search_base=search_base,
                         scope=adws_scope,
-                        query_sd=query_sd,
                     )
+                if enum_ctx is None:
+                    logging.warning('[ADWS_SEARCH] No enumeration context for filter=%s', search_filter)
+                    return
 
+                # Pull batches one at a time, releasing the lock between batches
                 entry_count = 0
-                for entry in self._parse_xml_entries(results_xml):
-                    self._complete_ranged_members(entry)
-                    entry_count += 1
-                    yield entry
-                logging.debug('[ADWS_SEARCH] Yielded %d entries for filter=%s', entry_count, search_filter)
+                batch_count = 0
+                more_results = True
+                while more_results:
+                    with self._io_lock:
+                        batch_xml, more_results = self._client._pull_results(
+                            remoteName=self._client._fqdn,
+                            nmf=self._client._nmf,
+                            enum_ctx=enum_ctx,
+                            query_sd=query_sd,
+                        )
+                    batch_count += 1
+                    # Parse and yield entries from this batch, then discard the XML
+                    for entry in self._parse_xml_entries(batch_xml):
+                        self._complete_ranged_members(entry)
+                        entry_count += 1
+                        yield entry
+                    del batch_xml
+
+                logging.debug('[ADWS_SEARCH] Yielded %d entries (%d batches) for filter=%s', entry_count, batch_count, search_filter)
                 return
 
             except Exception as e:
                 error_str = str(e)
+                # Try to release the enumeration context on error
+                try:
+                    if 'enum_ctx' in dir() and enum_ctx:
+                        with self._io_lock:
+                            self._client._release_enumeration(self._client._fqdn, self._client._nmf, enum_ctx)
+                except Exception:
+                    pass
+
                 if query_sd and 'does not support the control' in error_str:
                     logging.warning('Server does not support SD_FLAGS control, retrying without security descriptors')
                     if 'nTSecurityDescriptor' in attr_list:
@@ -469,9 +498,11 @@ class ADWSClient:
                         self.reconnect()
                     continue
                 if 'NoConnectionAvailable' in error_str and attempt < max_retries:
-                    wait = 2 ** attempt
-                    logging.debug('ADWS server busy, retrying in %ds (%d/%d)', wait, attempt + 1, max_retries)
+                    wait = 5 * (attempt + 1)
+                    logging.debug('ADWS server busy, reconnecting in %ds (%d/%d)', wait, attempt + 1, max_retries)
                     time.sleep(wait)
+                    with self._io_lock:
+                        self.reconnect()
                     continue
                 if any(s in error_str for s in ('Connection closed', 'Broken pipe', 'ConnectionError', 'ConnectionReset')) and attempt < max_retries:
                     logging.debug('ADWS connection lost, reconnecting (%d/%d)', attempt + 1, max_retries)
