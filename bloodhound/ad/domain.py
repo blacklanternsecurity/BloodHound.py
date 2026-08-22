@@ -584,21 +584,29 @@ class ADDC(ADComputer):
 
     def _adws_autosplit_search_iter(self, base_query, attributes, object_type, query_sd=False, search_base=None):
         """Streaming version: yields entries one at a time. Splits by CN
-        prefix if the server's connection pool is exhausted mid-query."""
-        count = 0
+        prefix if the server's connection pool is exhausted mid-query.
+
+        When the initial pull returns partial results, we discard them
+        and re-fetch everything via prefix sharding to avoid duplicates.
+        """
+        # Buffer the initial pull to check if it's partial
+        initial_entries = []
         for entry in self.search(base_query, attributes, generator=True,
                                  query_sd=query_sd, search_base=search_base):
-            count += 1
-            yield entry
+            initial_entries.append(entry)
 
         # Heuristic: if count is a clean multiple of 256 (batch size),
-        # the pull likely hit an error boundary. Split and re-fetch.
-        if count > 0 and count % 256 == 0:
-            logging.info('[AUTOSPLIT] %s query returned exactly %d results (likely partial), splitting by CN prefix',
-                         object_type, count)
+        # the pull likely hit an error boundary.
+        if len(initial_entries) > 0 and len(initial_entries) % 256 == 0:
+            logging.info('[AUTOSPLIT] %s query returned exactly %d results (likely partial), '
+                         'discarding and splitting by CN prefix',
+                         object_type, len(initial_entries))
+            del initial_entries
             yield from self._split_by_prefix_iter(base_query, attributes, object_type,
                                                    query_sd=query_sd, search_base=search_base,
                                                    prefixes=[''])
+        else:
+            yield from initial_entries
 
     def _split_by_prefix(self, base_query, attributes, object_type, query_sd=False,
                          search_base=None, prefixes=None, depth=0):
