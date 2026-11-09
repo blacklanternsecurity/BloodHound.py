@@ -10,3 +10,5 @@ dist/
 *.ccache
 Pipfile
 Pipfile.lock
+bloodhound-debug*.log
+*.7z
