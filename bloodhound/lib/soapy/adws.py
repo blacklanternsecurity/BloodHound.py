@@ -31,6 +31,9 @@ from .soap_templates import (
     LDAP_PULL_FSTRING,
     LDAP_PUT_FSTRING,
     LDAP_QUERY_FSTRING,
+    ADCAP_GET_GROUP_MEMBER_FSTRING,
+    LDAP_RELEASE_FSTRING,
+    LDAP_ROOT_DSE_FSTRING,
     NAMESPACES,
     SD_FLAGS_CONTROL_XML,
 )
@@ -306,6 +309,7 @@ class ADWSConnect:
         logging.debug(f"Connecting to ADWS at {connect_host}:9389 for {self._resource}")
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(30)
         sock.connect(server_address)
 
         nmf = ms_nmf.NMFConnection(
@@ -347,14 +351,18 @@ class ADWSConnect:
 
         enumeration = LDAP_QUERY_FSTRING.format(**query_vars)
 
+        logging.debug('[ADWS_PULL] Sending enumeration request: query=%s, base=%s, scope=%s', query, search_base, scope)
         nmf.send(enumeration)
+        logging.debug('[ADWS_PULL] Waiting for enumeration response...')
         enumerationResponse = nmf.recv()
+        logging.debug('[ADWS_PULL] Received enumeration response (%d bytes)', len(enumerationResponse))
 
         et = self._handle_str_to_xml(enumerationResponse)
         if not et:
             raise ValueError("was unable to parse xml from the server response")
 
         enum_ctx = et.find(".//wsen:EnumerationContext", NAMESPACES)
+        logging.debug('[ADWS_PULL] Got enumeration context: %s', enum_ctx.text if enum_ctx is not None else 'None')
 
         return enum_ctx.text if enum_ctx is not None else None
 
@@ -368,26 +376,50 @@ class ADWSConnect:
         (OID 1.2.840.113556.1.4.801) so the server returns nTSecurityDescriptor
         without requiring SeSecurityPrivilege.
         """
+        controls = SD_FLAGS_CONTROL_XML if query_sd else ""
+
         pull_vars = {
             "uuid": str(uuid4()),
             "fqdn": remoteName,
             "enum_ctx": enum_ctx,
-            "controls": SD_FLAGS_CONTROL_XML if query_sd else "",
+            "controls": controls,
         }
 
         pull = LDAP_PULL_FSTRING.format(**pull_vars)
+        has_controls = bool(controls.strip())
+        logging.debug('[ADWS_PULL] Sending pull request (query_sd=%s, has_controls=%s)...', query_sd, has_controls)
         nmf.send(pull)
+        logging.debug('[ADWS_PULL] Waiting for pull response...')
         pullResponse = nmf.recv()
+        logging.debug('[ADWS_PULL] Received pull response (%d bytes)', len(pullResponse))
+        if ':Fault>' in pullResponse or ':Reason>' in pullResponse:
+            logging.debug('[ADWS_PULL] FAULT in pull response (query_sd=%s, has_controls=%s): %s', query_sd, has_controls, pullResponse[:2000])
 
         et = self._handle_str_to_xml(pullResponse)
         if not et:
             raise ValueError("was unable to parse xml from the server response")
 
         final_pkt = et.find(".//wsen:EndOfSequence", namespaces=NAMESPACES)
+        items = et.findall(".//wsen:Items/*", namespaces=NAMESPACES)
+        logging.debug('[ADWS_PULL] Batch contains %d items, end_of_sequence=%s', len(items), final_pkt is not None)
         if final_pkt is not None:
             return (et, False)
 
         return (et, True)
+
+    def _release_enumeration(self, remoteName: str, nmf: ms_nmf.NMFConnection, enum_ctx: str) -> None:
+        """Send a WS-Enumeration Release to free the server-side enumeration context."""
+        try:
+            release = LDAP_RELEASE_FSTRING.format(
+                uuid=str(uuid4()),
+                fqdn=remoteName,
+                enum_ctx=enum_ctx,
+            )
+            nmf.send(release)
+            nmf.recv()
+            logging.debug('[ADWS_PULL] Released enumeration context')
+        except Exception as e:
+            logging.debug('[ADWS_PULL] Failed to release enumeration context: %s', e)
 
     def _handle_str_to_xml(self, xmlstr: str) -> ElementTree.Element | None:
         """Takes an xml string and returns an Element of the root node."""
@@ -426,6 +458,8 @@ class ADWSConnect:
         else:
             detail_xmlstr = ""
 
+        logging.debug('[ADWS_FAULT] Reason: %s', base_msg.strip() if base_msg else '(none)')
+        logging.debug('[ADWS_FAULT] Detail: %s', detail_xmlstr[:500] if detail_xmlstr else '(none)')
         raise ADWSError(base_msg + detail_xmlstr)
 
     def _get_tag_name(self, elem: ElementTree.Element) -> str:
@@ -501,21 +535,87 @@ class ADWSConnect:
             )
             raise ValueError("unable to get enumeration context")
 
+        import time as _time
+
         ElementTree.register_namespace("wsen", NAMESPACES["wsen"])
         results: ElementTree.Element = ElementTree.Element("wsen:Items")
+        batch_count = 0
+        total_items = 0
+        pull_start_time = _time.monotonic()
         more_results = True
         while more_results:
-            et, more_results = self._pull_results(
-                remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
-                query_sd=query_sd,
-            )
-            if len(et.findall(".//wsen:Items", namespaces=NAMESPACES)) == 0:
-                logging.debug("No objects returned in this batch")
+            try:
+                batch_start = _time.monotonic()
+                logging.debug('[ADWS_PULL] Pulling batch %d (elapsed %.1fs)...', batch_count + 1, batch_start - pull_start_time)
+                et, more_results = self._pull_results(
+                    remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
+                    query_sd=query_sd,
+                )
+                batch_elapsed = _time.monotonic() - batch_start
+                logging.debug('[ADWS_PULL] Batch %d took %.1fs', batch_count + 1, batch_elapsed)
+            except Exception as e:
+                error_str = str(e)
+                self._release_enumeration(self._fqdn, self._nmf, enum_ctx)
+                if 'does not support the control' in error_str and batch_count == 0:
+                    logging.warning('[ADWS_PULL] Server rejected control on first batch, re-raising for retry')
+                    raise
+                if batch_count > 0:
+                    logging.warning('[ADWS_PULL] Error after %d batches (%d items), returning partial results: %s', batch_count, total_items, e)
+                    break
+                logging.warning('[ADWS_PULL] Connection error on first batch: %s', e)
+                raise
+            batch_count += 1
+            batch_items = et.findall(".//wsen:Items", namespaces=NAMESPACES)
+            if len(batch_items) == 0:
+                logging.debug("[ADWS_PULL] No objects returned in batch %d", batch_count)
             else:
-                for item in et.findall(".//wsen:Items", namespaces=NAMESPACES):
+                for item in batch_items:
                     results.append(item)
+                    total_items += len(item)
 
+        logging.debug('[ADWS_PULL] Pull complete: %d batches, %d total items', batch_count, total_items)
         return results
+
+    def get_rootdse(self) -> dict:
+        """Query the RootDSE via WS-Transfer Get on a temporary Resource endpoint.
+
+        Returns a dict of RootDSE attribute name -> value (strings).
+        """
+        resource_nmf = self._connect(self._fqdn, "Resource")
+        try:
+            msg = LDAP_ROOT_DSE_FSTRING.format(
+                uuid=str(uuid4()),
+                fqdn=self._fqdn,
+            )
+            resource_nmf.send(msg)
+            resp = resource_nmf.recv()
+
+            et = self._handle_str_to_xml(resp)
+            if et is None:
+                return {}
+
+            result = {}
+            addata_ns = NAMESPACES.get("addata", "")
+            ad_ns = NAMESPACES.get("ad", "")
+            for elem in et.iter():
+                tag = elem.tag
+                if addata_ns and tag.startswith("{" + addata_ns + "}"):
+                    attr_name = tag.split("}")[-1]
+                    values = elem.findall(
+                        "{%s}value" % ad_ns
+                    )
+                    if values:
+                        texts = [v.text for v in values if v.text]
+                        if len(texts) == 1:
+                            result[attr_name] = texts[0]
+                        elif texts:
+                            result[attr_name] = texts
+            return result
+        finally:
+            try:
+                resource_nmf._sock.close()
+            except Exception:
+                pass
 
     @classmethod
     def pull_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth, target_ip: str | None = None) -> Self:
@@ -524,3 +624,57 @@ class ADWSConnect:
     @classmethod
     def put_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth, target_ip: str | None = None) -> Self:
         return cls(ip, domain, username, auth, "Resource", target_ip=target_ip)
+
+    @classmethod
+    def account_client(cls, ip: str, domain: str, username: str, auth: NTLMAuth | KerberosAuth, target_ip: str | None = None) -> Self:
+        return cls(ip, domain, username, auth, "AccountManagement", target_ip=target_ip)
+
+    def get_group_members(self, group_dn: str, partition_dn: str, recursive: bool = False) -> list:
+        """Call GetADGroupMember to enumerate a group's full membership.
+
+        Uses the MS-ADCAP custom action which resolves membership
+        server-side, bypassing the MaxValRange (1500) limit that
+        truncates the member attribute on regular searches.
+
+        Returns a list of dicts with keys: dn, name, objectClass,
+        objectGuid, sid, samAccountName.
+        """
+        if self._resource != "AccountManagement":
+            raise NotImplementedError("get_group_members requires an AccountManagement client")
+
+        request = ADCAP_GET_GROUP_MEMBER_FSTRING.format(
+            uuid=str(uuid4()),
+            fqdn=self._fqdn,
+            group_dn=group_dn,
+            partition_dn=partition_dn,
+            recursive='true' if recursive else 'false',
+        )
+
+        self._nmf.send(request)
+        response = self._nmf.recv()
+
+        et = self._handle_str_to_xml(response)
+        if not et:
+            raise ValueError("unable to parse GetADGroupMember response")
+
+        members = []
+        # The response contains ActiveDirectoryPrincipal elements
+        # under GetADGroupMemberResponse/Members
+        ns_ca = "http://schemas.microsoft.com/2008/1/ActiveDirectory/CustomActions"
+        for principal in et.iter(f'{{{ns_ca}}}ActiveDirectoryPrincipal'):
+            member = {}
+            for field, tag in [
+                ('dn', 'DistinguishedName'),
+                ('name', 'Name'),
+                ('objectClass', 'ObjectClass'),
+                ('objectGuid', 'ObjectGuid'),
+                ('sid', 'SID'),
+                ('samAccountName', 'SamAccountName'),
+            ]:
+                elem = principal.find(f'{{{ns_ca}}}{tag}')
+                member[field] = elem.text if elem is not None and elem.text else ''
+            if member.get('dn'):
+                members.append(member)
+
+        logging.debug('[ADWS] GetADGroupMember %s: %d members', group_dn, len(members))
+        return members

@@ -33,7 +33,7 @@ from dns import resolver
 from ldap3 import ALL_ATTRIBUTES, BASE, SUBTREE, LEVEL
 from ldap3.core.exceptions import LDAPKeyError, LDAPAttributeError, LDAPCursorError, LDAPNoSuchObjectResult, LDAPSocketReceiveError, LDAPSocketSendError, LDAPCommunicationError
 from ldap3.protocol.microsoft import security_descriptor_control
-from bloodhound.ad.utils import ADUtils, DNSCache, SidCache, SamCache, CollectionException
+from bloodhound.ad.utils import ADUtils, DNSCache, SidCache, SamCache, DNCache, CollectionException
 from bloodhound.ad.computer import ADComputer
 from bloodhound.enumeration.objectresolver import ObjectResolver
 
@@ -301,6 +301,9 @@ class ADDC(ADComputer):
                 searcher = self.ldap
 
         hadresults = False
+        result_count = 0
+        logging.debug('[LDAP] Search: filter=%s, base=%s, scope=%s, query_sd=%s, paged_size=200',
+                      search_filter, search_base, search_scope, query_sd)
         sresult = searcher.extend.standard.paged_search(search_base,
                                                         search_filter,
                                                         attributes=attributes,
@@ -309,34 +312,28 @@ class ADDC(ADComputer):
                                                         controls=controls,
                                                         generator=generator)
         try:
-            # Use a generator for the result regardless of if the search function uses one
             for e in sresult:
                 if e['type'] != 'searchResEntry':
                     continue
                 if not hadresults:
                     hadresults = True
+                result_count += 1
                 yield e
+            logging.debug('[LDAP] Search complete: %d results for filter=%s', result_count, search_filter)
         except LDAPNoSuchObjectResult:
-            # This may indicate the object doesn't exist or access is denied
             logging.warning('LDAP Server reported that the search in %s for %s does not exist.', search_base, search_filter)
         except (LDAPSocketReceiveError, LDAPSocketSendError, LDAPCommunicationError) as e:
+            logging.warning('[LDAP] Connection lost after %d results for filter=%s: %s', result_count, search_filter, e)
             if is_retry:
-                logging.error('Connection to LDAP server lost during data gathering - reconnect failed - giving up on query %s', search_filter)
+                logging.error('[LDAP] Reconnect retry also failed - giving up on query %s (%d results returned)', search_filter, result_count)
             else:
-                if hadresults:
-                    logging.error('Connection to LDAP server lost during data gathering. Query was cut short. Data may be inaccurate for query %s', search_filter)
-                    if use_gc:
-                        self.gc_connect()
-                    else:
-                        self.ldap_connect(resolver=use_resolver)
+                logging.warning('[LDAP] Re-establishing connection with server')
+                if use_gc:
+                    self.gc_connect()
                 else:
-                    logging.warning('Re-establishing connection with server')
-                    if use_gc:
-                        self.gc_connect()
-                    else:
-                        self.ldap_connect(resolver=use_resolver)
-                    # Try again
-                    yield from self.search(search_filter, attributes, search_base, generator, use_gc, use_resolver, query_sd, is_retry=True)
+                    self.ldap_connect(resolver=use_resolver)
+                logging.info('[LDAP] Retrying query %s (had %d results before disconnect)', search_filter, result_count)
+                yield from self.search(search_filter, attributes, search_base, generator, use_gc, use_resolver, query_sd, is_retry=True)
 
 
     def ldap_get_single(self, qobject, attributes=None, use_gc=False, use_resolver=False, is_retry=False):
@@ -575,73 +572,202 @@ class ADDC(ADComputer):
                 dncache[ADUtils.get_entry_property(lentry, 'distinguishedName').upper()] = cacheitem
         return dncache, sidcache
 
+    # Characters used for AutoSplit prefix sharding
+    _AUTOSPLIT_CHARS = list('abcdefghijklmnopqrstuvwxyz0123456789')
+
+    def _adws_autosplit_search(self, base_query, attributes, object_type, query_sd=False, search_base=None):
+        """Fetch objects with automatic query splitting. Returns a list.
+        Used for the SD pass where we need the full result set as a dict."""
+        entries = list(self._adws_autosplit_search_iter(base_query, attributes, object_type,
+                                                        query_sd=query_sd, search_base=search_base))
+        return entries
+
+    def _adws_autosplit_search_iter(self, base_query, attributes, object_type, query_sd=False, search_base=None):
+        """Streaming version: yields entries one at a time. Splits by CN
+        prefix if the server's connection pool is exhausted mid-query.
+
+        When the initial pull returns partial results, we discard them
+        and re-fetch everything via prefix sharding to avoid duplicates.
+        """
+        # Buffer the initial pull to check if it's partial
+        initial_entries = []
+        for entry in self.search(base_query, attributes, generator=True,
+                                 query_sd=query_sd, search_base=search_base):
+            initial_entries.append(entry)
+
+        # Heuristic: if count is a clean multiple of 256 (batch size),
+        # the pull likely hit an error boundary.
+        if len(initial_entries) > 0 and len(initial_entries) % 512 == 0:
+            logging.info('[AUTOSPLIT] %s query returned exactly %d results (likely partial), '
+                         'discarding and splitting by CN prefix',
+                         object_type, len(initial_entries))
+            del initial_entries
+            yield from self._split_by_prefix_iter(base_query, attributes, object_type,
+                                                   query_sd=query_sd, search_base=search_base,
+                                                   prefixes=[''])
+        else:
+            yield from initial_entries
+
+    def _split_by_prefix(self, base_query, attributes, object_type, query_sd=False,
+                         search_base=None, prefixes=None, depth=0):
+        """Recursively split a query by CN prefix to stay under server limits."""
+        import time as _time
+
+        if depth > 2:
+            logging.warning('[AUTOSPLIT] Max split depth reached, returning what we have')
+            return []
+
+        all_entries = []
+        for entry in self._split_by_prefix_iter(base_query, attributes, object_type,
+                                                 query_sd=query_sd, search_base=search_base,
+                                                 prefixes=prefixes, depth=depth):
+            all_entries.append(entry)
+        return all_entries
+
+    def _split_by_prefix_iter(self, base_query, attributes, object_type, query_sd=False,
+                              search_base=None, prefixes=None, depth=0):
+        """Streaming version of prefix splitting. Yields entries one at a time."""
+        import time as _time
+
+        if depth > 2:
+            logging.warning('[AUTOSPLIT] Max split depth reached')
+            return
+
+        chars = self._AUTOSPLIT_CHARS
+        parent_prefix = prefixes[0] if prefixes else ''
+        total = 0
+
+        for char in chars:
+            prefix = parent_prefix + char
+            if base_query.startswith('(&'):
+                split_query = '(&(cn=%s*)%s' % (prefix, base_query[2:])
+            elif base_query.startswith('(|'):
+                split_query = '(&(cn=%s*)%s)' % (prefix, base_query)
+            else:
+                split_query = '(&(cn=%s*)%s)' % (prefix, base_query)
+
+            logging.debug('[AUTOSPLIT] Querying %s with prefix cn=%s* (depth=%d)', object_type, prefix, depth)
+
+            if char != chars[0]:
+                _time.sleep(0.5)
+
+            sub_count = 0
+            for entry in self.search(split_query, attributes, generator=True,
+                                     query_sd=query_sd, search_base=search_base):
+                sub_count += 1
+                total += 1
+                yield entry
+
+            if sub_count > 0 and sub_count % 512 == 0:
+                logging.info('[AUTOSPLIT] Prefix cn=%s* returned %d results (likely partial), subdividing',
+                             prefix, sub_count)
+                _time.sleep(2)
+                for entry in self._split_by_prefix_iter(base_query, attributes, object_type,
+                                                         query_sd=query_sd, search_base=search_base,
+                                                         prefixes=[prefix], depth=depth + 1):
+                    total += 1
+                    yield entry
+            elif sub_count > 0:
+                logging.debug('[AUTOSPLIT] Prefix cn=%s*: %d results (total so far: %d)',
+                              prefix, sub_count, total)
+
+        logging.info('[AUTOSPLIT] Split complete for %s (depth=%d): %d total results', object_type, depth, total)
+
+    def _adws_two_pass(self, query, properties, object_type, search_base=None):
+        """Fetch objects in two passes over ADWS with automatic query splitting.
+
+        Pass 1 (SDs first): Fetch security descriptors with SD_FLAGS into a
+            DN->SD lookup dict. Only DNs and SDs are stored (~4KB per object).
+        Pass 2 (objects): Stream all objects without SD_FLAGS, merging SDs
+            from the lookup dict into each entry as it's yielded.
+
+        By fetching SDs first and streaming objects second, peak memory is
+        only the SD map (~200MB for 40k objects) instead of holding both
+        the full object list and the SD map simultaneously (~2.4GB).
+        """
+        import time as _time
+
+        # Pass 1: fetch security descriptors into a lookup dict
+        logging.info('ADWS %s collection: fetching security descriptors first', object_type)
+        sd_entries = self._adws_autosplit_search(query,
+                                                 ['distinguishedName', 'nTSecurityDescriptor'],
+                                                 object_type + '_sd',
+                                                 query_sd=True, search_base=search_base)
+        sd_map = {}
+        for sd_entry in sd_entries:
+            dn = sd_entry.get('dn', '').upper()
+            sd = sd_entry.get('raw_attributes', {}).get('nTSecurityDescriptor')
+            if dn and sd:
+                sd_map[dn] = sd
+        logging.info('Security descriptors fetched: %d for %s', len(sd_map), object_type)
+        del sd_entries
+
+        _time.sleep(2)
+
+        # Pass 2: stream objects, merging SDs on the fly
+        logging.info('ADWS %s collection: streaming objects', object_type)
+        entry_count = 0
+        for entry in self._adws_autosplit_search_iter(query, properties, object_type,
+                                                       query_sd=False, search_base=search_base):
+            dn = entry.get('dn', '').upper()
+            if dn in sd_map:
+                entry['raw_attributes']['nTSecurityDescriptor'] = sd_map[dn]
+                entry['attributes']['nTSecurityDescriptor'] = sd_map[dn]
+            entry_count += 1
+            yield entry
+        logging.info('ADWS %s collection complete: %d objects, %d with security descriptors',
+                     object_type, entry_count, len(sd_map))
+
     def get_groups(self, include_properties=False, acl=False):
         properties = ['distinguishedName', 'samaccountname', 'samaccounttype', 'objectsid', 'member']
         if include_properties:
             properties += ['adminCount', 'description', 'whencreated']
+        query = '(objectClass=group)'
+        if acl and self.use_adws:
+            return self._adws_two_pass(query, properties, 'groups')
         if acl:
             properties += ['nTSecurityDescriptor']
-        entries = self.search('(objectClass=group)',
-                              properties,
-                              generator=True,
-                              query_sd=acl)
+        entries = self.search(query, properties, generator=True, query_sd=acl)
         return entries
 
     def get_gpos(self, include_properties=False, acl=False):
         properties = ['distinguishedName', 'name', 'objectGUID', 'gPCFileSysPath', 'displayName']
         if include_properties:
             properties += ['description', 'whencreated']
+        query = '(objectCategory=groupPolicyContainer)'
+        if acl and self.use_adws:
+            return self._adws_two_pass(query, properties, 'gpos')
         if acl:
             properties += ['nTSecurityDescriptor']
-        entries = self.search('(objectCategory=groupPolicyContainer)',
-                              properties,
-                              generator=True,
-                              query_sd=acl)
+        entries = self.search(query, properties, generator=True, query_sd=acl)
         return entries
 
     def get_ous(self, include_properties=False, acl=False):
         properties = ['distinguishedName', 'name', 'objectGUID', 'gPLink', 'gPOptions']
         if include_properties:
             properties += ['description', 'whencreated']
+        query = '(objectCategory=organizationalUnit)'
+        if acl and self.use_adws:
+            return self._adws_two_pass(query, properties, 'ous')
         if acl:
             properties += ['nTSecurityDescriptor']
-        entries = self.search('(objectCategory=organizationalUnit)',
-                              properties,
-                              generator=True,
-                              query_sd=acl)
+        entries = self.search(query, properties, generator=True, query_sd=acl)
         return entries
 
     def get_containers(self, include_properties=False, acl=False, dn=''):
         properties = ['distinguishedName', 'name', 'objectGUID', 'isCriticalSystemObject','objectClass', 'objectCategory']
         if include_properties:
             properties += ['description', 'whencreated']
+        query = '(&(objectCategory=container)(objectClass=container))'
+        if acl and self.use_adws:
+            return self._adws_two_pass(query, properties, 'containers', search_base=dn)
         if acl:
             properties += ['nTSecurityDescriptor']
-        entries = self.search('(&(objectCategory=container)(objectClass=container))',
-                              properties,
-                              generator=True,
-                              query_sd=acl,
-                              search_base=dn)
+        entries = self.search(query, properties, generator=True, query_sd=acl, search_base=dn)
         return entries
 
-    def get_users(self, include_properties=False, acl=False):
-
-        properties = ['sAMAccountName', 'distinguishedName', 'sAMAccountType',
-                      'objectSid', 'primaryGroupID', 'isDeleted', 'objectClass']
-        if 'ms-DS-GroupMSAMembership'.lower() in self.objecttype_guid_map:
-            properties.append('msDS-GroupMSAMembership')
-
-        if include_properties:
-            properties += ['userAccountControl', 'displayName',
-                           'lastLogon', 'lastLogonTimestamp', 'pwdLastSet', 'mail', 'title', 'homeDirectory',
-                           'description', 'userPassword', 'adminCount', 'msDS-AllowedToDelegateTo', 'sIDHistory',
-                           'whencreated', 'unicodepwd', 'scriptpath']
-            if 'unixuserpassword' in self.objecttype_guid_map:
-                properties.append('unixuserpassword')
-        if acl:
-            properties.append('nTSecurityDescriptor')
-
-        # Query for MSA only if server supports it
+    def _build_user_query(self):
+        """Build the LDAP filter for user enumeration."""
         if self.use_adws:
             has_gmsa = self._adws_client.supports_object_class('msDS-GroupManagedServiceAccount')
             has_smsa = self._adws_client.supports_object_class('msDS-ManagedServiceAccount')
@@ -662,13 +788,31 @@ class ADDC(ADComputer):
             smsa_filter = ''
 
         if gmsa_filter or smsa_filter:
-            query = '(|(&(objectCategory=person)(objectClass=user)){}{})'.format(gmsa_filter, smsa_filter)
-        else:
-            query = '(&(objectCategory=person)(objectClass=user))'
-        entries = self.search(query,
-                              properties,
-                              generator=True,
-                              query_sd=acl)
+            return '(|(&(objectCategory=person)(objectClass=user)){}{})'.format(gmsa_filter, smsa_filter)
+        return '(&(objectCategory=person)(objectClass=user))'
+
+    def get_users(self, include_properties=False, acl=False):
+
+        properties = ['sAMAccountName', 'distinguishedName', 'sAMAccountType',
+                      'objectSid', 'primaryGroupID', 'isDeleted', 'objectClass']
+        if 'ms-DS-GroupMSAMembership'.lower() in self.objecttype_guid_map:
+            properties.append('msDS-GroupMSAMembership')
+
+        if include_properties:
+            properties += ['userAccountControl', 'displayName',
+                           'lastLogon', 'lastLogonTimestamp', 'pwdLastSet', 'mail', 'title', 'homeDirectory',
+                           'description', 'userPassword', 'adminCount', 'msDS-AllowedToDelegateTo', 'sIDHistory',
+                           'whencreated', 'unicodepwd', 'scriptpath']
+            if 'unixuserpassword' in self.objecttype_guid_map:
+                properties.append('unixuserpassword')
+
+        query = self._build_user_query()
+
+        if acl and self.use_adws:
+            return self._adws_two_pass(query, properties, 'users')
+        if acl:
+            properties.append('nTSecurityDescriptor')
+        entries = self.search(query, properties, generator=True, query_sd=acl)
         return entries
 
 
@@ -722,11 +866,11 @@ class ADDC(ADComputer):
         else:
             query = '(&(sAMAccountType=805306369))'
 
-        entries = self.search(query,
-                              properties,
-                              generator=True,
-                              query_sd=acl)
-
+        if acl and self.use_adws:
+            # Remove nTSecurityDescriptor from properties for pass 1
+            props_no_sd = [p for p in properties if p != 'nTSecurityDescriptor']
+            return self._adws_two_pass(query, props_no_sd, 'computers')
+        entries = self.search(query, properties, generator=True, query_sd=acl)
         return entries
 
     def get_computers_withcache(self, include_properties=False, acl=False):
@@ -843,9 +987,9 @@ class AD(object):
         self.sidcache = SidCache()
         # Create a thread-safe SAM lookup cache
         self.samcache = SamCache()
-        # DN cache dict - use generic cache for all objects
-        # holds only direct bloodhound output
-        self.dncache = {}
+        # DN cache - normalizes keys (uppercased, stripped spaces) for
+        # consistent lookups regardless of DN formatting differences.
+        self.dncache = DNCache()
         self.newsidcache = SidCache()
         # Create SID cache for computer accounts
         self.computersidcache = SidCache()
@@ -895,7 +1039,7 @@ class AD(object):
     def load_cachefile(self, cachefile):
         with codecs.open(cachefile, 'r', 'utf-8') as cfile:
             cachedata = json.load(cfile)
-        self.dncache = cachedata['dncache']
+        self.dncache = DNCache(cachedata['dncache'])
         self.newsidcache.load(cachedata['sidcache'])
         logging.info('Loaded cached DNs and SIDs from cachefile')
 
@@ -1004,7 +1148,7 @@ class AD(object):
 
     def get_dn_from_cache_or_ldap(self, distinguishedname):
         try:
-            linkentry = self.dncache[distinguishedname.upper()]
+            linkentry = self.dncache[distinguishedname]
         except KeyError:
             use_gc = ADUtils.ldap2domain(distinguishedname).lower() != self.domain.lower()
             qobject = self.objectresolver.resolve_distinguishedname(distinguishedname, use_gc=use_gc)
@@ -1017,7 +1161,7 @@ class AD(object):
                 "ObjectIdentifier": resolved_entry['objectid'],
                 "ObjectType": resolved_entry['type'].capitalize()
             }
-            self.dncache[distinguishedname.upper()] = linkentry
+            self.dncache[distinguishedname] = linkentry
         return linkentry
 
 """
