@@ -69,7 +69,7 @@ class ComputerEnumerator(MembershipEnumerator):
         process_queue = queue.Queue()
 
         result_q = queue.Queue()
-        if (fileNamePrefix != None):
+        if (fileNamePrefix is not None):
             results_worker = threading.Thread(target=OutputWorker.write_worker, args=(result_q, fileNamePrefix + '_' + timestamp + 'computers.json'))
         else:
             results_worker = threading.Thread(target=OutputWorker.write_worker, args=(result_q, timestamp + 'computers.json'))
@@ -84,7 +84,7 @@ class ComputerEnumerator(MembershipEnumerator):
             thread.start()
 
         for _, computer in computers.items():
-            if not 'attributes' in computer:
+            if 'attributes' not in computer:
                 continue
 
             # if 'dNSHostName' not in computer['attributes']:
@@ -244,7 +244,7 @@ class ComputerEnumerator(MembershipEnumerator):
                 # Process found registry sessions
                 for ses in registry_sessions:
                     c.registry_sessions.append({'ComputerSID':objectsid, 'UserSID':ses['user']})
-    
+
                 # Process Tasks
                 for taskuser in tasks:
                     c.loggedon.append({'ComputerSID':objectsid, 'UserSID':taskuser})

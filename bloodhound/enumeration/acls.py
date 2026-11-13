@@ -23,7 +23,6 @@
 ####################
 import logging
 import multiprocessing
-from multiprocessing import Pool
 from impacket.uuid import string_to_bin, bin_to_string
 from bloodhound.lib import cstruct
 from io import BytesIO
@@ -201,7 +200,7 @@ def parse_binary_acl(entry, entrytype, acl, objecttype_guid_map):
             if not ace_object.has_flag(ACE.INHERITED_ACE) and ace_object.has_flag(ACE.INHERIT_ONLY_ACE):
                 # ACE is set on this object, but only inherited, so not applicable to us
                 continue
-            
+
             if mask.has_priv(ACCESS_MASK.GENERIC_ALL):
                 # Generic all includes all other rights, so skip from here
                 relations.append(build_relation(sid, 'GenericAll', inherited=is_inherited))

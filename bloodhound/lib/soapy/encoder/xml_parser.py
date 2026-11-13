@@ -184,7 +184,7 @@ class XMLParser(HTMLParser):
             if base64_reg.match(data):
                 base64.b64decode(data)
                 b64 = True
-        except:
+        except Exception:
             b64 = False
         if data == "0":
             return ZeroTextRecord()

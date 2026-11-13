@@ -161,7 +161,7 @@ class ArrayRecord(record):
         bytes += struct.pack("<B", self.recordtype)[0]
         bytes += MultiByteInt31(self.count).to_bytes()
         for data in self.data:
-            if type(data) == str:
+            if isinstance(data, str):
                 bytes += data
             else:
                 bytes += data.to_bytes()

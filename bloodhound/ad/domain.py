@@ -24,16 +24,14 @@
 import logging
 import random
 import time
-import traceback
 import codecs
 import json
 import ldap3
-import ipaddress
 
 from uuid import UUID
 from dns import resolver
 from ldap3 import ALL_ATTRIBUTES, BASE, SUBTREE, LEVEL
-from ldap3.core.exceptions import LDAPKeyError, LDAPAttributeError, LDAPCursorError, LDAPNoSuchObjectResult, LDAPSocketReceiveError, LDAPSocketSendError, LDAPCommunicationError
+from ldap3.core.exceptions import LDAPAttributeError, LDAPCursorError, LDAPNoSuchObjectResult, LDAPSocketReceiveError, LDAPSocketSendError, LDAPCommunicationError
 from ldap3.protocol.microsoft import security_descriptor_control
 from bloodhound.ad.utils import ADUtils, DNSCache, SidCache, SamCache, DNCache, CollectionException
 from bloodhound.ad.computer import ADComputer
@@ -83,7 +81,7 @@ class ADDC(ADComputer):
                 ip = rdata.address
                 logging.debug('Resolved %s to %s', self.hostname, ip)
                 break
-        except:
+        except Exception:
             pass
 
         # Pass FQDN as hostname (needed for Kerberos SPN), resolved IP for TCP
@@ -125,7 +123,7 @@ class ADDC(ADComputer):
                     if _conn:
                         logging.debug('Successful connection to LDAP server on IP: %s', rdata.address)
                         ip = rdata.address
-        except:
+        except Exception:
             logging.debug('No A records found')
 
         try:
@@ -147,7 +145,7 @@ class ADDC(ADComputer):
                     if _conn:
                         logging.debug('Successful connection to: %s', rdata.address)
                         ip = f'[{rdata.address}]'
-        except:
+        except Exception:
             logging.debug('No AAAA records found')
 
         if not ip:
@@ -184,7 +182,7 @@ class ADDC(ADComputer):
                 logging.error('Could not find a Global Catalog in this domain!'\
                               ' Resolving will be unreliable in forests with multiple domains')
                 return False
-        
+
         ip = None
         try:
             # Convert the hostname to an IP, this prevents ldap3 from doing it
@@ -214,11 +212,11 @@ class ADDC(ADComputer):
                 except (resolver.NXDOMAIN, resolver.Timeout) as e:
                     logging.warning('Failed to resolve alternative GC server %s: %s', server, str(e))
                     continue
-        
+
         if ip is None:
             logging.error('Failed to resolve any GC server to an IP address')
             return False
-        
+
         try:
             self.gcldap = self.ad.auth.getLDAPConnection(hostname=self.hostname, ip=ip, gc=True,
                                                          baseDN=self.ad.baseDN, protocol=protocol)
@@ -375,7 +373,7 @@ class ADDC(ADComputer):
                                                             attributes=attributes,
                                                             paged_size=10,
                                                             generator=False)
-        except (LDAPSocketReceiveError, LDAPSocketSendError, LDAPCommunicationError) as e:
+        except (LDAPSocketReceiveError, LDAPSocketSendError, LDAPCommunicationError):
             if is_retry:
                 logging.error('Connection to LDAP server lost during object resolving - reconnect failed - giving up on resolving %s', qobject)
                 return None
@@ -544,7 +542,7 @@ class ADDC(ADComputer):
             entriesNum += 1
             # Todo: actually use these objects instead of discarding them
             # means rewriting other functions
-            d = ADDomain.fromLDAP(entry['attributes']['nCName'])
+            ADDomain.fromLDAP(entry['attributes']['nCName'])
             # We don't want to add our own domain since this entry doesn't contain the sid
             # which we need later on
             if entry['attributes']['nCName'] not in self.ad.domains:
@@ -948,7 +946,7 @@ class ADDC(ADComputer):
                               search_base=dn,
                               search_scope=LEVEL,
                               use_resolver=use_resolver)
-                              
+
         return entries
 
     def get_trusts(self):

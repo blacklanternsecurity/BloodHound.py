@@ -88,7 +88,7 @@ class ObjectResolver(object):
                     return host.split('.')[0] + '$'  # Add $ for computer account
                 else:
                     return host + '$'
-        
+
         # Not an SPN, return as-is
         return username
 
@@ -99,17 +99,17 @@ class ObjectResolver(object):
         """
         # Parse potential SPN to extract actual account name
         parsed_samname = self._parse_spn_username(samname)
-        
+
         # If we parsed an SPN, log the transformation
         if parsed_samname != samname:
             logging.debug('[SAM_RESOLVE] Parsed SPN "%s" to account name "%s"', samname, parsed_samname)
-        
+
         out = []
         if not allow_filter:
             safename = escape_filter_chars(parsed_samname)
         else:
             safename = parsed_samname
-        
+
         with self.lock:
             if use_gc:
                 if not self.addc.gcldap:
@@ -117,7 +117,7 @@ class ObjectResolver(object):
                         # Error connecting, bail
                         logging.warning('[SAM_RESOLVE] Failed to establish GC connection for SAM name %s', samname)
                         return None
-            
+
             try:
                 # First try searching the entire forest (empty base)
                 entries = self.addc.search(search_base="",
@@ -129,7 +129,7 @@ class ObjectResolver(object):
                 for entry in entries:
                     out.append(entry)
                     entry_count += 1
-                
+
                 # If no results and we're using GC, try searching each domain individually
                 if entry_count == 0 and use_gc and hasattr(self.addc.ad, 'domains'):
                     logging.debug('[SAM_RESOLVE] Forest-wide search failed for %s, trying individual domain searches...', samname)
@@ -151,13 +151,13 @@ class ObjectResolver(object):
                         except Exception as domain_e:
                             logging.warning('[SAM_RESOLVE] Failed to search domain %s for %s: %s', domain_name, samname, str(domain_e))
                             continue
-                
+
                 if entry_count == 0:
                     if parsed_samname != samname:
                         logging.warning('[SAM_RESOLVE] Could not find user %s (parsed from SPN "%s") in any domain of the forest', parsed_samname, samname)
                     else:
                         logging.warning('[SAM_RESOLVE] Could not find user %s in any domain of the forest', samname)
-                
+
             except Exception as e:
                 logging.error('[SAM_RESOLVE] LDAP search failed for SAM name %s: %s', samname, str(e))
                 return None

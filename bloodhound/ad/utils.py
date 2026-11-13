@@ -134,7 +134,7 @@ class ADUtils(object):
             return True
         except KeyboardInterrupt:
             raise
-        except:
+        except Exception:
             return False
 
     @staticmethod
@@ -149,9 +149,9 @@ class ADUtils(object):
         try:
             answer = str(resolver.query(addr, 'PTR', tcp=use_tcp)[0])
             result = answer.rstrip('.')
-        except (dns.resolver.NXDOMAIN, dns.resolver.Timeout) as e:
+        except (dns.resolver.NXDOMAIN, dns.resolver.Timeout):
             pass
-        except:
+        except Exception:
             logging.warning('DNS lookup failed: %s' % addr)
             pass
 
@@ -168,7 +168,7 @@ class ADUtils(object):
         binding = r'ncacn_np:%s[\PIPE\wkssvc]' % ip
         rpctransportWkst = transport.DCERPCTransportFactory(binding)
         if hasattr(rpctransportWkst, 'set_credentials'):
-            rpctransportWkst.set_credentials(adauth.username, adauth.password, 
+            rpctransportWkst.set_credentials(adauth.username, adauth.password,
                                 adauth.domain, adauth.lm_hash, adauth.nt_hash, adauth.aes_key)
             rpctransportWkst.set_kerberos(False, adauth.kdc) # not supported yet
         dce = rpctransportWkst.get_dce_rpc()
@@ -184,7 +184,7 @@ class ADUtils(object):
                 result = '.'.join([result, domain_name])
 
             dce.disconnect()
-        except:
+        except Exception:
             logging.warning('WkstaGetInfo failed: %s' % ip)
             pass
 
@@ -206,13 +206,13 @@ class ADUtils(object):
                     result = '.'.join((result, info['dns_domain']))
                 return result.lower()
             return None
-        
+
         try:
             ntlm_dumper = DumpNtlm(ip, ip, 445)
             hostname = parse_info(ntlm_dumper.GetInfo())
             if hostname:
                 return hostname
-        except:
+        except Exception:
             pass
 
         try:
@@ -220,7 +220,7 @@ class ADUtils(object):
             hostname = parse_info(ntlm_dumper.GetInfo())
             if hostname:
                 return hostname
-        except:
+        except Exception:
             pass
 
         try:
@@ -228,7 +228,7 @@ class ADUtils(object):
             hostname = parse_info(ntlm_dumper.GetInfo())
             if hostname:
                 return hostname
-        except:
+        except Exception:
             pass
 
         return ip
@@ -281,7 +281,7 @@ class ADUtils(object):
         resolved['objectid'] = ADUtils.get_entry_property(entry, 'objectSid', '')
         resolved['principal'] = ('%s@%s' % (account, domain)).upper()
         if not ADUtils.get_entry_property(entry, 'sAMAccountName'):
-            if 'ForeignSecurityPrincipals' in dn and not 'container' in ADUtils.get_entry_property(entry, 'objectClass', []):
+            if 'ForeignSecurityPrincipals' in dn and 'container' not in ADUtils.get_entry_property(entry, 'objectClass', []):
                 resolved['principal'] = domain.upper()
                 resolved['type'] = 'foreignsecurityprincipal'
                 ename = ADUtils.get_entry_property(entry, 'name')

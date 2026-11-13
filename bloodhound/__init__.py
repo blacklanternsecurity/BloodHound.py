@@ -22,7 +22,16 @@
 #
 ####################
 
-import os, sys, logging, argparse, getpass, time, re, datetime, json, codecs
+import os
+import sys
+import logging
+import argparse
+import getpass
+import time
+import re
+import datetime
+import json
+import codecs
 from zipfile import ZipFile
 from bloodhound.ad.domain import AD, ADDC
 from bloodhound.ad.authentication import ADAuthentication
@@ -434,13 +443,13 @@ def main():
                    exclude_dcs=args.exclude_dcs,
                    fileNamePrefix=args.outputprefix,
                    state=state)
-    #If args --zip is true, the compress output  
+    #If args --zip is true, the compress output
     if args.zip:
         logging.info("Compressing output into " + timestamp + "bloodhound.zip")
         # Get a list of files in the current dir
         list_of_files = os.listdir(os.getcwd())
         # Create handle to zip file with timestamp prefix
-        if(args.outputprefix!=None):
+        if(args.outputprefix is not None):
             with ZipFile(args.outputprefix + "_" + timestamp + "bloodhound.zip",'w') as zip:
                 # For each of those files we fetched
                 for each_file in list_of_files:

@@ -35,7 +35,7 @@ class OutputWorker(object):
             Worker to write the results from the results_q to the given files.
         """
 
-      
+
         computers_out = codecs.open(computers_filename, 'w', 'utf-8')
         filenumber = 0
 
@@ -103,7 +103,7 @@ class OutputWorker(object):
         try:
             membership_out = codecs.open(filename, 'w', 'utf-8')
             filenumber = 0
-        except:
+        except Exception:
             logging.warning('Could not write file: %s', filename)
             result_q.task_done()
             return

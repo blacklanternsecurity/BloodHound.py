@@ -26,7 +26,7 @@ import logging
 import ssl
 import os
 import traceback
-from hashlib import sha256, md5
+from hashlib import md5
 from bloodhound.ad.utils import CollectionException
 from binascii import unhexlify
 from cryptography import x509
@@ -39,11 +39,10 @@ from ldap3.operation.bind import bind_operation
 from impacket.krb5.ccache import CCache
 from impacket.krb5.types import Principal, KerberosTime, Ticket
 from pyasn1.codec.der import decoder, encoder
-from impacket.krb5.asn1 import AP_REQ, AS_REP, TGS_REQ, Authenticator, TGS_REP, seq_set, seq_set_iter, PA_FOR_USER_ENC, \
-    Ticket as TicketAsn1, EncTGSRepPart
+from impacket.krb5.asn1 import AP_REQ, AS_REP, Authenticator, TGS_REP, seq_set
 from impacket.krb5 import constants
-from impacket.krb5.kerberosv5 import getKerberosTGT, getKerberosTGS, sendReceive
-from impacket.krb5.gssapi import CheckSumField, GSS_C_SEQUENCE_FLAG, GSS_C_REPLAY_FLAG, GSS_C_MUTUAL_FLAG
+from impacket.krb5.kerberosv5 import getKerberosTGT, getKerberosTGS
+from impacket.krb5.gssapi import CheckSumField
 import datetime
 from pyasn1.type.univ import noValue
 from impacket.spnego import SPNEGO_NegTokenInit, TypesMech
@@ -141,7 +140,7 @@ class ADAuthentication(object):
             logging.debug('Authenticating to LDAP server with Kerberos')
             try:
                 bound = self.ldap_kerberos(conn, hostname)
-            except Exception as exc:
+            except Exception:
                 if self.auth_method == 'auto':
                     logging.debug(traceback.format_exc())
                     logging.warning('Kerberos auth to LDAP failed, trying NTLM')
@@ -358,7 +357,6 @@ class ADAuthentication(object):
         Get a TGS for use with SMB Connection. We do this here to make sure the realms are correct,
         since impacket doesn't support cross-realm TGT usage and we don't want it to do its own Kerberos
         """
-        username = Principal(self.username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
         servername = Principal('cifs/%s' % hostname, type=constants.PrincipalNameType.NT_SRV_INST.value)
         tgs, cipher, _, sessionkey = getKerberosTGS(servername, self.domain, self.kdc,
                                                                 self.tgt['KDC_REP'], self.tgt['cipher'], self.tgt['sessionKey'])
@@ -397,7 +395,7 @@ class ADAuthentication(object):
             TGT = creds.toTGT()
             # This we store for later
             self.tgt = TGT
-            tgt, cipher, session_key = TGT['KDC_REP'], TGT['cipher'], TGT['sessionKey']
+            tgt, _cipher, _session_key = TGT['KDC_REP'], TGT['cipher'], TGT['sessionKey']
             logging.info('Using TGT from cache')
         else:
             logging.debug("No valid credentials found in cache. ")

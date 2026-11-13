@@ -5,6 +5,7 @@ This module provides an ADWSClient class that wraps the low-level ADWS protocol
 implementation and provides an ldap3-compatible interface for BloodHound's
 enumeration code.
 """
+from __future__ import annotations
 
 import logging
 import re
@@ -12,6 +13,10 @@ import time
 import threading
 from base64 import b64decode
 from datetime import datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bloodhound.ad.domain import AD
 from typing import Any, Dict, List, Optional, Generator
 from uuid import UUID
 from xml.etree import ElementTree
@@ -122,7 +127,7 @@ class ADWSClient:
         except ValueError:
             return None
 
-    def __init__(self, hostname: str, ad: "AD", target_ip: str | None = None):
+    def __init__(self, hostname: str, ad: AD, target_ip: str | None = None):
         """
         Initialize ADWS client.
 

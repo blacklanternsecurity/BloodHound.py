@@ -120,7 +120,7 @@ class MembershipEnumerator(object):
         props['sfupassword'] = None
 
     def enumerate_users(self, timestamp="", fileNamePrefix=""):
-        if (fileNamePrefix != None):
+        if (fileNamePrefix is not None):
             filename = fileNamePrefix + "_" + timestamp + 'users.json'
         else:
             filename = timestamp + 'users.json'
@@ -188,7 +188,8 @@ class MembershipEnumerator(object):
                             })
                         except KeyError:
                             object_sam = target.upper().split(".")[0].split("\\")[0]
-                            if object_sam in delegatehosts_cache: continue
+                            if object_sam in delegatehosts_cache:
+                                continue
                             delegatehosts_cache.append(object_sam)
                             object_entry = self.addomain.objectresolver.resolve_samname(object_sam + '*', allow_filter=True)
                             if object_entry:
@@ -258,7 +259,7 @@ class MembershipEnumerator(object):
         # Should we include extra properties in the query?
         with_properties = 'objectprops' in self.collect
         acl = 'acl' in self.collect
-        if (fileNamePrefix != None):
+        if (fileNamePrefix is not None):
             filename = fileNamePrefix + "_" + timestamp + 'groups.json'
         else:
             filename = timestamp + 'groups.json'
@@ -355,7 +356,7 @@ class MembershipEnumerator(object):
         Enumerate computer objects. This function is only used if no
         collection was requested that required connecting to computers anyway.
         '''
-        if (fileNamePrefix != None):
+        if (fileNamePrefix is not None):
             filename = fileNamePrefix + "_" + timestamp + 'computers.json'
         else:
             filename = timestamp + 'computers.json'
@@ -378,7 +379,7 @@ class MembershipEnumerator(object):
 
         # This loops over the cached entries
         for entry in entries:
-            if not 'attributes' in entry:
+            if 'attributes' not in entry:
                 continue
 
             hostname = ADUtils.get_entry_property(entry, 'dNSHostName')
@@ -418,7 +419,7 @@ class MembershipEnumerator(object):
         logging.debug('Finished writing computers')
 
     def enumerate_gpos(self, timestamp ="", fileNamePrefix=""):
-        if (fileNamePrefix != None):
+        if (fileNamePrefix is not None):
             filename = fileNamePrefix + "_" + timestamp + 'gpos.json'
         else:
             filename = timestamp + 'gpos.json'
@@ -439,7 +440,7 @@ class MembershipEnumerator(object):
             self.aclenumerator.init_pool()
 
         for entry in entries:
-            resolved_entry = ADUtils.resolve_ad_entry(entry)
+            ADUtils.resolve_ad_entry(entry)
             try:
                 guid = entry['attributes']['objectGUID'][1:-1].upper()
             except KeyError:
@@ -460,7 +461,7 @@ class MembershipEnumerator(object):
                 "IsACLProtected": False,
                 "Aces": [],
             }
-            
+
             if with_properties:
                 gpo["Properties"]["description"] = ADUtils.get_entry_property(entry, 'description', '')
                 whencreated = ADUtils.get_entry_property(entry, 'whencreated', default=0)
@@ -505,7 +506,7 @@ class MembershipEnumerator(object):
         logging.debug('Finished writing GPO')
 
     def enumerate_ous(self, timestamp ="", fileNamePrefix=""):
-        if (fileNamePrefix != None):
+        if (fileNamePrefix is not None):
             filename = fileNamePrefix + "_" + timestamp + 'ous.json'
         else:
             filename = timestamp + 'ous.json'
@@ -525,7 +526,7 @@ class MembershipEnumerator(object):
             self.aclenumerator.init_pool()
 
         for entry in entries:
-            resolved_entry = ADUtils.resolve_ad_entry(entry)
+            ADUtils.resolve_ad_entry(entry)
             try:
                 guid = entry['attributes']['objectGUID'][1:-1].upper()
             except KeyError:
@@ -557,7 +558,7 @@ class MembershipEnumerator(object):
                 },
             }
 
-            
+
             if with_properties:
                 ou["Properties"]["description"] = ADUtils.get_entry_property(entry, 'description')
                 whencreated = ADUtils.get_entry_property(entry, 'whencreated', default=0)
@@ -565,7 +566,7 @@ class MembershipEnumerator(object):
                     ou['Properties']['whencreated'] = whencreated
                 else:
                     ou['Properties']['whencreated'] = calendar.timegm(whencreated.timetuple())
-            
+
             for childentry in self.addc.get_childobjects(ou["Properties"]["distinguishedname"]):
                 resolved_childentry = ADUtils.resolve_ad_entry(childentry)
                 # Skip children with empty ID because it breaks ingestion
@@ -576,7 +577,7 @@ class MembershipEnumerator(object):
                     "ObjectType":resolved_childentry['type']
                 }
                 ou["ChildObjects"].append(out_object)
-            
+
             for gplink_dn, option in ADUtils.parse_gplink_string(ADUtils.get_entry_property(entry, 'gPLink', '')):
                 if option == 0 or option == 2:
                     link = dict()
@@ -588,7 +589,7 @@ class MembershipEnumerator(object):
                         ou['Links'].append(link)
                     except TypeError:
                         logging.warning('Could not resolve GPO link to {0}'.format(gplink_dn))
-            
+
             # Create cache entry for links
             link_output = {
                 "ObjectIdentifier": ou['ObjectIdentifier'],
@@ -625,7 +626,7 @@ class MembershipEnumerator(object):
         logging.debug('Finished writing OU')
 
     def enumerate_containers(self, timestamp ="", fileNamePrefix=""):
-        if (fileNamePrefix != None):
+        if (fileNamePrefix is not None):
             filename = fileNamePrefix + "_" + timestamp + 'containers.json'
         else:
             filename = timestamp + 'containers.json'
@@ -647,7 +648,7 @@ class MembershipEnumerator(object):
         for entry in entries:
             if ADUtils.is_filtered_container(ADUtils.get_entry_property(entry, 'distinguishedName')):
                 continue
-            resolved_entry = ADUtils.resolve_ad_entry(entry)
+            ADUtils.resolve_ad_entry(entry)
             try:
                 guid = entry['attributes']['objectGUID'][1:-1].upper()
             except KeyError:
@@ -670,7 +671,7 @@ class MembershipEnumerator(object):
                 "ChildObjects": [],
             }
 
-            
+
             if with_properties:
                 container["Properties"]["description"] = ADUtils.get_entry_property(entry, 'description', '')
                 whencreated = ADUtils.get_entry_property(entry, 'whencreated', default=0)
@@ -678,7 +679,7 @@ class MembershipEnumerator(object):
                     container["Properties"]["whencreated"] = whencreated
                 else:
                     container["Properties"]["whencreated"] = calendar.timegm(whencreated.timetuple())
-            
+
             for childentry in self.addc.get_childobjects(container["Properties"]["distinguishedname"]):
                 if ADUtils.is_filtered_container_child(ADUtils.get_entry_property(childentry, 'distinguishedName')):
                     continue
@@ -691,7 +692,7 @@ class MembershipEnumerator(object):
                     "ObjectType":resolved_childentry['type']
                 }
                 container["ChildObjects"].append(childobject)
-            
+
             # Create cache entry for links
             link_output = {
                 "ObjectIdentifier": container['ObjectIdentifier'],
@@ -751,7 +752,6 @@ class MembershipEnumerator(object):
         Write built-in users to users.json file
         """
 
-        domainsid = self.addomain.domain_object.sid
         domainname = self.addomain.domain.upper()
 
         user = {
@@ -804,7 +804,6 @@ class MembershipEnumerator(object):
             group["Members"].append(memberdata)
         self.result_q.put(group)
 
-        domainsid = self.addomain.domain_object.sid
         domainname = self.addomain.domain.upper()
 
         # Everyone
