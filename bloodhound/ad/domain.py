@@ -628,12 +628,14 @@ class ADDC(ADComputer):
                               search_base=None, prefixes=None, depth=0):
         """Streaming version of prefix splitting. Yields entries one at a time."""
         import time as _time
+        import random as _random
 
         if depth > 2:
             logging.warning('[AUTOSPLIT] Max split depth reached')
             return
 
-        chars = self._AUTOSPLIT_CHARS
+        chars = list(self._AUTOSPLIT_CHARS)
+        _random.shuffle(chars)
         parent_prefix = prefixes[0] if prefixes else ''
         total = 0
 
@@ -649,7 +651,7 @@ class ADDC(ADComputer):
             logging.debug('[AUTOSPLIT] Querying %s with prefix cn=%s* (depth=%d)', object_type, prefix, depth)
 
             if char != chars[0]:
-                _time.sleep(0.5)
+                _time.sleep(_random.uniform(0.3, 1.5))
 
             sub_count = 0
             for entry in self.search(split_query, attributes, generator=True,
@@ -661,7 +663,7 @@ class ADDC(ADComputer):
             if sub_count > 0 and sub_count % 512 == 0:
                 logging.info('[AUTOSPLIT] Prefix cn=%s* returned %d results (likely partial), subdividing',
                              prefix, sub_count)
-                _time.sleep(2)
+                _time.sleep(_random.uniform(1.5, 3.0))
                 for entry in self._split_by_prefix_iter(base_query, attributes, object_type,
                                                          query_sd=query_sd, search_base=search_base,
                                                          prefixes=[prefix], depth=depth + 1):
