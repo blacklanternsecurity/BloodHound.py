@@ -5,12 +5,18 @@ This module provides an ADWSClient class that wraps the low-level ADWS protocol
 implementation and provides an ldap3-compatible interface for BloodHound's
 enumeration code.
 """
+from __future__ import annotations
 
 import logging
 import re
+import time
 import threading
 from base64 import b64decode
 from datetime import datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bloodhound.ad.domain import AD
 from typing import Any, Dict, List, Optional, Generator
 from uuid import UUID
 from xml.etree import ElementTree
@@ -121,7 +127,7 @@ class ADWSClient:
         except ValueError:
             return None
 
-    def __init__(self, hostname: str, ad: "AD", target_ip: str | None = None):
+    def __init__(self, hostname: str, ad: AD, target_ip: str | None = None):
         """
         Initialize ADWS client.
 
@@ -134,13 +140,12 @@ class ADWSClient:
         self.target_ip = target_ip
         self.ad = ad
         self._client: Optional[ADWSConnect] = None
+        self._acct_client: Optional[ADWSConnect] = None
         self._schema_classes: Optional[set] = None
         self._configuration_dn: Optional[str] = None
-        # Serializes SOAP request/response cycles on the single shared TCP/NMF
-        # stream. Without this, the main enumeration thread and the ACL
-        # callback thread (from the multiprocessing pool's result callback)
-        # can interleave requests, corrupting frames and causing server RST.
+        self._schema_dn: Optional[str] = None
         self._io_lock = threading.Lock()
+        self._acct_lock = threading.Lock()
 
     def connect(self) -> None:
         """
@@ -181,21 +186,140 @@ class ADWSClient:
 
         self._resolve_base_dn()
 
+    def reconnect(self) -> bool:
+        """Re-establish the ADWS connection after a failure."""
+        logging.info('Reconnecting to ADWS...')
+        auth = self.ad.auth
+        if auth.tgt is not None:
+            adws_auth = KerberosAuth(tgt=auth.tgt, domain=auth.domain, kdc=auth.kdc)
+        elif auth.nt_hash:
+            adws_auth = NTLMAuth(hashes=auth.nt_hash)
+        elif auth.password:
+            adws_auth = NTLMAuth(password=auth.password)
+        else:
+            return False
+        try:
+            self._client = ADWSConnect.pull_client(
+                ip=self.hostname,
+                domain=self.ad.domain,
+                username=auth.username,
+                auth=adws_auth,
+                target_ip=self.target_ip,
+            )
+            logging.info('ADWS reconnection successful')
+            return True
+        except Exception as e:
+            logging.error('ADWS reconnection failed: %s', e)
+            return False
+
+    def _ensure_account_client(self) -> None:
+        """Lazily connect to the Windows/AccountManagement endpoint."""
+        if self._acct_client is not None:
+            return
+        auth = self.ad.auth
+        if auth.tgt is not None:
+            adws_auth = KerberosAuth(tgt=auth.tgt, domain=auth.domain, kdc=auth.kdc)
+        elif auth.nt_hash:
+            adws_auth = NTLMAuth(hashes=auth.nt_hash)
+        elif auth.password:
+            adws_auth = NTLMAuth(password=auth.password)
+        else:
+            raise CollectionException("No credentials for AccountManagement endpoint")
+        try:
+            logging.debug('Opening AccountManagement endpoint')
+            self._acct_client = ADWSConnect.account_client(
+                ip=self.hostname,
+                domain=self.ad.domain,
+                username=auth.username,
+                auth=adws_auth,
+                target_ip=self.target_ip,
+            )
+            logging.debug('AccountManagement endpoint connected')
+        except Exception as e:
+            logging.warning('AccountManagement endpoint failed: %s', e)
+            self._acct_client = None
+
+    def get_group_members(self, group_dn: str, partition_dn: Optional[str] = None) -> Optional[list]:
+        """Get a group's full membership via GetADGroupMember.
+
+        Uses a separate connection to Windows/AccountManagement.
+        Returns a list of member dicts, or None if the call fails.
+        """
+        self._ensure_account_client()
+        if self._acct_client is None:
+            return None
+
+        if partition_dn is None:
+            dc_parts = [p for p in group_dn.split(',') if p.upper().startswith('DC=')]
+            partition_dn = ','.join(dc_parts)
+
+        try:
+            with self._acct_lock:
+                members = self._acct_client.get_group_members(group_dn, partition_dn)
+            return members
+        except Exception as e:
+            logging.debug('GetADGroupMember failed for %s: %s', group_dn, e)
+            return None
+
+    def _discover_configuration_from_domain(self) -> None:
+        """Discover the Configuration partition DN from the domain object.
+
+        The domain object's fSMORoleOwner attribute points to the NTDS
+        Settings object of the PDC, which lives inside the Configuration
+        partition. For example:
+            CN=NTDS Settings,CN=DC01,CN=Servers,CN=Site,CN=Sites,CN=Configuration,DC=forest,DC=root
+
+        By finding 'CN=Configuration,' in that DN we can extract the
+        real Configuration partition DN. This works even when the forest
+        root is a completely different domain name from the child domain.
+        """
+        logging.debug('Attempting to discover Configuration DN from domain fSMORoleOwner')
+        try:
+            with self._io_lock:
+                results_xml = self._client.pull(
+                    query="(objectClass=*)",
+                    attributes=["fSMORoleOwner"],
+                    search_base=self.ad.baseDN,
+                    scope="Base",
+                )
+            for entry in self._parse_xml_entries(results_xml):
+                attrs = entry.get('attributes', {})
+                fsmo = attrs.get('fSMORoleOwner')
+                if fsmo:
+                    if isinstance(fsmo, list):
+                        fsmo = fsmo[0]
+                    logging.debug('Domain fSMORoleOwner: %s', fsmo)
+                    idx = fsmo.upper().find('CN=CONFIGURATION,')
+                    if idx != -1:
+                        config_dn = fsmo[idx:]
+                        logging.debug('Extracted Configuration DN from fSMORoleOwner: %s', config_dn)
+                        self._configuration_dn = config_dn
+                        return
+                logging.debug('Could not extract Configuration DN from fSMORoleOwner')
+                return
+        except Exception as e:
+            logging.debug('fSMORoleOwner query failed: %s', e)
+
     def _resolve_base_dn(self) -> None:
         """Resolve the correct base DN and configuration partition DN.
 
-        ADWS is case-sensitive about distinguished names unlike LDAP. The
-        base DN we construct from DNS is lowercased, but the server may
-        store it with mixed case. A probe search lets the server tell us
-        the real DN — either via a successful result or via MatchedDN in
-        the SOAP fault.
-
-        The Configuration partition lives at the forest root, not the
-        domain root, so for child domains we also need to discover the
-        real configuration DN rather than assuming it's under our baseDN.
+        Probes the base DN for correct casing, then discovers the
+        Configuration partition. First tries extracting it from the
+        domain object's fSMORoleOwner (works for child domains in
+        multi-domain forests where the forest root has a different
+        DNS name). Falls back to walking up DC components.
         """
+        logging.debug('Initial baseDN from DNS: %s', self.ad.baseDN)
         self.ad.baseDN = self._probe_dn(self.ad.baseDN)
-        self._resolve_configuration_dn()
+        self._discover_configuration_from_domain()
+
+        if not self._configuration_dn:
+            logging.debug('fSMORoleOwner discovery failed, falling back to DC component probe')
+            self._resolve_configuration_dn()
+
+        logging.debug('Resolved baseDN: %s', self.ad.baseDN)
+        logging.debug('Resolved configurationNamingContext: %s', self.configuration_naming_context)
+        logging.debug('Resolved schemaNamingContext: %s', self.schema_naming_context)
 
     def _probe_dn(self, dn: str) -> str:
         """Search for a DN and return the server's correctly-cased version."""
@@ -265,6 +389,8 @@ class ADWSClient:
     @property
     def schema_naming_context(self) -> str:
         """Return schema partition base DN."""
+        if self._schema_dn:
+            return self._schema_dn
         return f"CN=Schema,{self.configuration_naming_context}"
 
     def supports_object_class(self, class_name: str) -> bool:
@@ -357,26 +483,89 @@ class ADWSClient:
 
         adws_scope = self._SCOPE_MAP.get(str(search_scope).upper(), 'Subtree')
 
-        try:
-            # Hold the lock only for the SOAP request/response. pull() completes
-            # its enumerate/pull loop before returning, so the lock does not span
-            # generator yields, which keeps consumers free to recurse back into
-            # search() without deadlocking.
-            with self._io_lock:
-                results_xml = self._client.pull(
-                    query=search_filter,
-                    attributes=attr_list,
-                    search_base=search_base,
-                    scope=adws_scope,
-                    query_sd=query_sd,
-                )
+        logging.debug('ADWS search: filter=%s, base=%s, scope=%s, query_sd=%s', search_filter, search_base, adws_scope, query_sd)
 
-            for entry in self._parse_xml_entries(results_xml):
-                self._complete_ranged_members(entry)
-                yield entry
+        max_retries = 3
+        seen_dns = set()
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    logging.debug('[ADWS_SEARCH] Attempt %d/%d for filter=%s (skipping %d already-yielded)',
+                                  attempt + 1, max_retries + 1, search_filter, len(seen_dns))
 
-        except Exception as e:
-            logging.warning('ADWS search %r failed: %s', search_filter, e)
+                with self._io_lock:
+                    enum_ctx = self._client.query_enumeration(
+                        remoteName=self._client._fqdn,
+                        nmf=self._client._nmf,
+                        query=search_filter,
+                        attributes=attr_list,
+                        search_base=search_base,
+                        scope=adws_scope,
+                    )
+                if enum_ctx is None:
+                    logging.warning('[ADWS_SEARCH] No enumeration context for filter=%s', search_filter)
+                    return
+
+                entry_count = 0
+                batch_count = 0
+                more_results = True
+                while more_results:
+                    with self._io_lock:
+                        batch_xml, more_results = self._client.pull_results(
+                            remoteName=self._client._fqdn,
+                            nmf=self._client._nmf,
+                            enum_ctx=enum_ctx,
+                            query_sd=query_sd,
+                        )
+                    batch_count += 1
+                    for entry in self._parse_xml_entries(batch_xml):
+                        self._complete_ranged_members(entry)
+                        dn = entry.get('dn', '')
+                        if dn and dn in seen_dns:
+                            continue
+                        if dn:
+                            seen_dns.add(dn)
+                        entry_count += 1
+                        yield entry
+                    del batch_xml
+
+                logging.debug('[ADWS_SEARCH] Yielded %d entries (%d batches) for filter=%s', entry_count, batch_count, search_filter)
+                return
+
+            except Exception as e:
+                error_str = str(e)
+                # Try to release the enumeration context on error
+                try:
+                    if 'enum_ctx' in dir() and enum_ctx:
+                        with self._io_lock:
+                            self._client.release_enumeration(self._client._fqdn, self._client._nmf, enum_ctx)
+                except Exception:
+                    pass
+
+                if query_sd and 'does not support the control' in error_str:
+                    logging.warning('Server does not support SD_FLAGS control, retrying without security descriptors')
+                    if 'nTSecurityDescriptor' in attr_list:
+                        attr_list.remove('nTSecurityDescriptor')
+                    query_sd = False
+                    continue
+                if 'timed out' in error_str and attempt < max_retries:
+                    logging.debug('ADWS connection timed out, reconnecting (%d/%d)', attempt + 1, max_retries)
+                    with self._io_lock:
+                        self.reconnect()
+                    continue
+                if 'NoConnectionAvailable' in error_str and attempt < max_retries:
+                    wait = 5 * (attempt + 1)
+                    logging.debug('ADWS server busy, reconnecting in %ds (%d/%d)', wait, attempt + 1, max_retries)
+                    time.sleep(wait)
+                    with self._io_lock:
+                        self.reconnect()
+                    continue
+                if any(s in error_str for s in ('Connection closed', 'Broken pipe', 'ConnectionError', 'ConnectionReset')) and attempt < max_retries:
+                    logging.debug('ADWS connection lost, reconnecting (%d/%d)', attempt + 1, max_retries)
+                    with self._io_lock:
+                        self.reconnect()
+                    continue
+                logging.warning('ADWS search %r failed: %s', search_filter, e)
 
     def get_single(
         self,
@@ -402,24 +591,40 @@ class ADWSClient:
         else:
             attr_list = list(attributes)
 
-        try:
-            # Use the DN as the search base with a simple filter.
-            # See search() for the rationale on the I/O lock.
-            with self._io_lock:
-                results_xml = self._client.pull(
-                    query="(objectClass=*)",
-                    attributes=attr_list,
-                    search_base=dn,
-                )
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                with self._io_lock:
+                    results_xml = self._client.pull(
+                        query="(objectClass=*)",
+                        attributes=attr_list,
+                        search_base=dn,
+                    )
 
-            entries = list(self._parse_xml_entries(results_xml))
-            if entries:
-                return entries[0]
-            return None
+                entries = list(self._parse_xml_entries(results_xml))
+                if entries:
+                    return entries[0]
+                return None
 
-        except Exception as e:
-            logging.warning('ADWS get_single %r failed: %s', dn, e)
-            return None
+            except Exception as e:
+                error_str = str(e)
+                if 'timed out' in error_str and attempt < max_retries:
+                    logging.debug('ADWS get_single timed out, reconnecting (%d/%d)', attempt + 1, max_retries)
+                    with self._io_lock:
+                        self.reconnect()
+                    continue
+                if 'NoConnectionAvailable' in error_str and attempt < max_retries:
+                    wait = 2 ** attempt
+                    logging.debug('ADWS server busy, retrying get_single in %ds (%d/%d)', wait, attempt + 1, max_retries)
+                    time.sleep(wait)
+                    continue
+                if any(s in error_str for s in ('Connection closed', 'Broken pipe', 'ConnectionError', 'ConnectionReset')) and attempt < max_retries:
+                    logging.debug('ADWS get_single connection lost, reconnecting (%d/%d)', attempt + 1, max_retries)
+                    with self._io_lock:
+                        self.reconnect()
+                    continue
+                logging.warning('ADWS get_single %r failed: %s', dn, e)
+                return None
 
     # AD's default MaxValRange is 1500. The ADWS XPath selection dialect
     # does not support LDAP range syntax (member;range=N-*), so we use a
@@ -430,8 +635,10 @@ class ADWSClient:
     _RANGE_THRESHOLD = 1499
 
     def _complete_ranged_members(self, entry: Dict[str, Any]) -> None:
-        """Re-query group members via reverse memberOf when the forward
-        member attribute was range-limited by the server."""
+        """Complete truncated group membership using GetADGroupMember
+        (server-side resolution, no MaxValRange limit). Falls back to
+        reverse memberOf query if the AccountManagement endpoint is
+        unavailable."""
         members = entry['attributes'].get('member')
         if not isinstance(members, list) or len(members) < self._RANGE_THRESHOLD:
             return
@@ -440,6 +647,21 @@ class ADWSClient:
         if not dn:
             return
 
+        # Try GetADGroupMember first — single call, no MaxValRange limit
+        gm_result = self.get_group_members(dn)
+        if gm_result is not None:
+            all_member_dns = [m['dn'] for m in gm_result if m.get('dn')]
+            if all_member_dns and len(all_member_dns) > len(members):
+                logging.debug('GetADGroupMember for %s: %d members (was %d)',
+                              dn, len(all_member_dns), len(members))
+                entry['attributes']['member'] = all_member_dns
+                entry['raw_attributes']['member'] = [
+                    m.encode('utf-8') if isinstance(m, str) else m for m in all_member_dns
+                ]
+            return
+
+        # Fallback: reverse memberOf query on the Enumeration endpoint
+        logging.debug('GetADGroupMember unavailable, falling back to reverse memberOf for %s', dn)
         from ldap3.utils.conv import escape_filter_chars
         escaped_dn = escape_filter_chars(dn)
 

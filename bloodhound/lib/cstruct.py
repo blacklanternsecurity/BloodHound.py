@@ -1765,8 +1765,7 @@ class Compiler(object):
 
             if isinstance(t, PackedType):
                 reader = 'list(struct.unpack(self.cstruct.endian + "{{:d}}{packchar}".format(dynsize), buf))'.format(
-                    packchar=t.packchar, type_size=t.size
-                )
+                    packchar=t.packchar, )
             elif isinstance(t, (CharType, WcharType)):
                 reader = 'buf'
                 if isinstance(t, WcharType):

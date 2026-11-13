@@ -79,7 +79,7 @@ class ADDomainTrust(object):
     def has_flag(self, flag):
         if self.flags is None or self.trust_flags.get(flag) is None:
             return False  # Handle the case where either self.flags or trust_flags[flag] is None
-    
+
         return self.flags & self.trust_flags[flag] == self.trust_flags[flag]
 
     def to_output(self):

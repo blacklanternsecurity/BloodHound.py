@@ -66,7 +66,7 @@ LDAP_PULL_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-
     <s:Body xmlns:wsen="http://schemas.xmlsoap.org/ws/2004/09/enumeration">
         <wsen:Pull>
             <wsen:EnumerationContext>{enum_ctx}</wsen:EnumerationContext>
-            <wsen:MaxElements>256</wsen:MaxElements>
+            <wsen:MaxElements>512</wsen:MaxElements>
             {controls}
         </wsen:Pull>
     </s:Body>
@@ -81,10 +81,71 @@ LDAP_PULL_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-
 SD_FLAGS_CONTROL_XML = (
     '<ad:controls>'
     '<ad:control type="1.2.840.113556.1.4.801" criticality="true">'
-    '<ad:controlValue xsi:type="xsd:base64Binary">MIQAAAADAgEF</ad:controlValue>'
+    '<ad:controlValue xsi:type="xsd:base64Binary">MAMCAQU=</ad:controlValue>'
     '</ad:control>'
     '</ad:controls>'
 )
+
+
+LDAP_ROOT_DSE_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+    xmlns:a="http://www.w3.org/2005/08/addressing"
+    xmlns:addata="http://schemas.microsoft.com/2008/1/ActiveDirectory/Data"
+    xmlns:ad="http://schemas.microsoft.com/2008/1/ActiveDirectory"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <s:Header>
+        <a:Action s:mustUnderstand="1">http://schemas.xmlsoap.org/ws/2004/09/transfer/Get</a:Action>
+        <ad:instance>ldap:389</ad:instance>
+        <ad:objectReferenceProperty>11111111-1111-1111-1111-111111111111</ad:objectReferenceProperty>
+        <a:MessageID>urn:uuid:{uuid}</a:MessageID>
+        <a:ReplyTo>
+            <a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address>
+        </a:ReplyTo>
+        <a:To s:mustUnderstand="1">net.tcp://{fqdn}:9389/ActiveDirectoryWebServices/Windows/Resource</a:To>
+    </s:Header>
+    <s:Body/>
+</s:Envelope>"""
+
+
+LDAP_RELEASE_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+    xmlns:a="http://www.w3.org/2005/08/addressing"
+    xmlns:ad="http://schemas.microsoft.com/2008/1/ActiveDirectory">
+    <s:Header>
+        <a:Action s:mustUnderstand="1">http://schemas.xmlsoap.org/ws/2004/09/enumeration/Release</a:Action>
+        <ad:instance>ldap:389</ad:instance>
+        <a:MessageID>urn:uuid:{uuid}</a:MessageID>
+        <a:ReplyTo>
+            <a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address>
+        </a:ReplyTo>
+        <a:To s:mustUnderstand="1">net.tcp://{fqdn}:9389/ActiveDirectoryWebServices/Windows/Enumeration</a:To>
+    </s:Header>
+    <s:Body xmlns:wsen="http://schemas.xmlsoap.org/ws/2004/09/enumeration">
+        <wsen:Release>
+            <wsen:EnumerationContext>{enum_ctx}</wsen:EnumerationContext>
+        </wsen:Release>
+    </s:Body>
+</s:Envelope>"""
+
+
+ADCAP_GET_GROUP_MEMBER_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+    xmlns:a="http://www.w3.org/2005/08/addressing">
+    <s:Header>
+        <a:Action s:mustUnderstand="1">http://schemas.microsoft.com/2008/1/ActiveDirectory/CustomActions/AccountManagement/GetADGroupMember</a:Action>
+        <ca:Server xmlns:ca="http://schemas.microsoft.com/2008/1/ActiveDirectory/CustomActions" xmlns="http://schemas.microsoft.com/2008/1/ActiveDirectory/CustomActions">ldap:389</ca:Server>
+        <a:MessageID>urn:uuid:{uuid}</a:MessageID>
+        <a:ReplyTo>
+            <a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address>
+        </a:ReplyTo>
+        <a:To s:mustUnderstand="1">net.tcp://{fqdn}:9389/ActiveDirectoryWebServices/Windows/AccountManagement</a:To>
+    </s:Header>
+    <s:Body>
+        <GetADGroupMemberRequest xmlns="http://schemas.microsoft.com/2008/1/ActiveDirectory/CustomActions">
+            <GroupDN>{group_dn}</GroupDN>
+            <PartitionDN>{partition_dn}</PartitionDN>
+            <Recursive>{recursive}</Recursive>
+        </GetADGroupMemberRequest>
+    </s:Body>
+</s:Envelope>"""
 
 
 LDAP_PUT_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"

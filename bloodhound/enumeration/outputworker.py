@@ -35,7 +35,7 @@ class OutputWorker(object):
             Worker to write the results from the results_q to the given files.
         """
 
-      
+
         computers_out = codecs.open(computers_filename, 'w', 'utf-8')
         filenumber = 0
 
@@ -67,8 +67,11 @@ class OutputWorker(object):
                 except TypeError:
                     logging.error('Data error {0}, could not convert data to json'.format(repr(data)))
                     computers_out.write('{}')
+                computers_out.flush()
                 num_computers += 1
                 current_num_computers += 1
+                if num_computers % 1000 == 0:
+                    logging.info('Processed %d computers', num_computers)
             else:
                 logging.warning("Type is %s this should not happen", objtype)
 
@@ -100,7 +103,7 @@ class OutputWorker(object):
         try:
             membership_out = codecs.open(filename, 'w', 'utf-8')
             filenumber = 0
-        except:
+        except Exception:
             logging.warning('Could not write file: %s', filename)
             result_q.task_done()
             return
@@ -129,8 +132,11 @@ class OutputWorker(object):
             except TypeError:
                 logging.error('Data error {0}, could not convert data to json'.format(repr(data)))
                 membership_out.write('{}')
+            membership_out.flush()
             num_members += 1
             current_num_members += 1
+            if num_members % 1000 == 0:
+                logging.info('Processed %d %s', num_members, enumtype)
 
             result_q.task_done()
             # Loop file if it gets too big

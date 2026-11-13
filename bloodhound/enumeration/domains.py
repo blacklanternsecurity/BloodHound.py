@@ -45,7 +45,7 @@ class DomainEnumerator(object):
         self.addc = addc
 
     def dump_domain(self, collect, timestamp="", filename='domains.json', fileNamePrefix=""):
-        if (fileNamePrefix != None):
+        if (fileNamePrefix is not None):
             filename = fileNamePrefix + "_" + timestamp + filename
         else:
             filename = timestamp + filename
@@ -61,7 +61,7 @@ class DomainEnumerator(object):
         try:
             logging.debug('Opening file for writing: %s' % filename)
             out = codecs.open(filename, 'w', 'utf-8')
-        except:
+        except Exception:
             logging.warning('Could not write file: %s' % filename)
             return
 

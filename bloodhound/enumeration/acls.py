@@ -23,7 +23,6 @@
 ####################
 import logging
 import multiprocessing
-from multiprocessing import Pool
 from impacket.uuid import string_to_bin, bin_to_string
 from bloodhound.lib import cstruct
 from io import BytesIO
@@ -155,7 +154,7 @@ def parse_binary_acl(entry, entrytype, acl, objecttype_guid_map):
 
                 # ServicePrincipalName property write rights (exclude generic rights)
                 if entrytype in ['user', 'computer'] and ace_object.acedata.has_flag(ACCESS_ALLOWED_OBJECT_ACE.ACE_OBJECT_TYPE_PRESENT) \
-                and ace_object.acedata.get_object_type().lower() == objecttype_guid_map['service-principal-name']:
+                and 'service-principal-name' in objecttype_guid_map and ace_object.acedata.get_object_type().lower() == objecttype_guid_map['service-principal-name']:
                     relations.append(build_relation(sid, 'WriteSPN', inherited=is_inherited))
 
             elif ace_object.acedata.mask.has_priv(ACCESS_MASK.ADS_RIGHT_DS_SELF):
@@ -201,7 +200,7 @@ def parse_binary_acl(entry, entrytype, acl, objecttype_guid_map):
             if not ace_object.has_flag(ACE.INHERITED_ACE) and ace_object.has_flag(ACE.INHERIT_ONLY_ACE):
                 # ACE is set on this object, but only inherited, so not applicable to us
                 continue
-            
+
             if mask.has_priv(ACCESS_MASK.GENERIC_ALL):
                 # Generic all includes all other rights, so skip from here
                 relations.append(build_relation(sid, 'GenericAll', inherited=is_inherited))
@@ -279,6 +278,8 @@ def ace_applies(ace_guid, object_class, objecttype_guid_map):
     Note that this function assumes you already verified that InheritedObjectType is set (via the flag).
     If this is not set, the ACE applies to all object types.
     '''
+    if object_class not in objecttype_guid_map:
+        return False
     if ace_guid == objecttype_guid_map[object_class]:
         return True
     # If none of these match, the ACE does not apply to this object

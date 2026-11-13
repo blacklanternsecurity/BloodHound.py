@@ -250,7 +250,7 @@ class FloatTextRecord(Text):
                 return "%.0f" % self.value
             else:
                 return str(self.value)
-        except:
+        except Exception:
             return str(self.value).upper()
 
     @classmethod

@@ -38,8 +38,6 @@ from bloodhound.ad.structures import LDAP_SID
 from impacket.smb3 import SMB3
 from impacket.smb import SMB
 from impacket.smbconnection import SessionError
-from impacket import smb
-from impacket.smb3structs import SMB2_DIALECT_21
 # Try to import exceptions here, if this does not succeed, then impacket version is too old
 try:
     HostnameValidationExceptions = (SMB3.HostnameValidationException, SMB.HostnameValidationException)
@@ -297,7 +295,7 @@ class ADComputer(object):
                 for r in q:
                     addr = r.address
 
-                if addr == None:
+                if addr is None:
                     return False
             # Do exit properly on keyboardinterrupts
             except KeyboardInterrupt:
@@ -343,7 +341,7 @@ class ADComputer(object):
                 if not self.TGS:
                     try:
                         self.TGS = self.ad.auth.get_tgs_for_smb(self.hostname)
-                    except Exception as exc:
+                    except Exception:
                         logging.debug(traceback.format_exc())
                         if self.auth_method == 'auto':
                             logging.warning('Failed to get service ticket for %s, falling back to NTLM auth', self.hostname)
@@ -417,7 +415,7 @@ class ADComputer(object):
                         # Close connection and retry
                         try:
                             self.rpc.get_smb_connection().close()
-                        except:
+                        except Exception:
                             pass
                         # Try again!
                         return self.dce_rpc_connect(binding, uuid, integrity)
@@ -450,7 +448,7 @@ class ADComputer(object):
             logging.debug(traceback.format_exc())
             logging.warning('DCE/RPC connection failed: %s', e)
             return None
-        except:
+        except Exception:
             logging.warning('DCE/RPC connection failed (unknown error)')
             return None
 
@@ -625,7 +623,7 @@ class ADComputer(object):
                         continue
                     registry_sessions.append({'user': sid})
                 index += 1
-            except:
+            except Exception:
                 break
 
         rrp.hBaseRegCloseKey(dce, key_handle)
@@ -785,14 +783,14 @@ class ADComputer(object):
                     resp = samr.hSamrLookupDomainInSamServer(dce, serverHandle, self.samname[:-1])
                     self.sid = resp['DomainId'].formatCanonical()
                 # This doesn't always work (for example on DCs)
-                except DCERPCException as e:
+                except DCERPCException:
                     # Make it a string which is guaranteed not to match a SID
                     self.sid = 'UNKNOWN'
 
 
             # Enumerate the domains known to this computer
             resp = samr.hSamrEnumerateDomainsInSamServer(dce, serverHandle)
-            domains = resp['Buffer']['Buffer']
+            resp['Buffer']['Buffer']
 
             # Query the builtin domain (derived from this SID)
             sid = RPC_SID()
@@ -901,7 +899,7 @@ class ADComputer(object):
                     resp = e.get_packet()
                 else:
                     raise
-            except NetBIOSTimeout as e:
+            except NetBIOSTimeout:
                 logging.warning('Connection timed out while resolving sids')
                 continue
 

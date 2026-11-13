@@ -9,14 +9,14 @@
 #
 # Description:
 #   Dump remote host information in ntlm authentication model, without credentials.
-#   For SMB protocols (1 and 2/3), it's easy to use SMBConnection class (thanks to @agsolino), 
-#   but since negotiate response is not available in original classes, 
+#   For SMB protocols (1 and 2/3), it's easy to use SMBConnection class (thanks to @agsolino),
+#   but since negotiate response is not available in original classes,
 #   we made out custom classes based on them.
 #   The usefull information in negotiate response are "Dialect Version", "Signing Options",
 #   "Maximum bytes allowed per smb request" and "Servers time information".
 #   The point is sometimes server dosn't include "boot time" in response. But we show it,
 #   when available, in this script.
-# 
+#
 #   It's very easy to use:
 #       python dumpntlm.py 192.168.1.63
 #
@@ -36,7 +36,8 @@
 
 import os
 import socket
-import string, random
+import string
+import random
 
 from impacket import nmb, ntlm
 from impacket.smb import SMB, NewSMBPacket, SMBCommand, SMBNTLMDialect_Parameters,\
@@ -56,7 +57,7 @@ class RPC:
     def __init__(self, target) -> None:
         self.MaxTrasmitionSize = 0
         self._initializeTransport(target)
-    
+
     def GetChallange(self):
         ntlmChallenge = None
         packet = self._create_bind_request()
@@ -65,9 +66,9 @@ class RPC:
         if buffer != 0:
             response = MSRPCHeader(buffer)
             bindResp = MSRPCBindAck(response.getData())
-            
+
             self.MaxTrasmitionSize = bindResp['max_rfrag']
-            
+
             ntlmChallenge = ntlm.NTLMAuthChallenge(bindResp['auth_data'])
         return ntlmChallenge
 
@@ -76,7 +77,7 @@ class RPC:
         self._rpctransport.set_credentials('', '', '', '', '')
         self._rpctransport.set_dport(135)
         self._rpctransport.connect()
-    
+
     def _create_bind_request(self):
         bind = MSRPCBind()
         item = CtxItem()
@@ -95,7 +96,7 @@ class RPC:
         sec_trailer = SEC_TRAILER()
         sec_trailer['auth_type']   = RPC_C_AUTHN_WINNT
         sec_trailer['auth_level']  = RPC_C_AUTHN_LEVEL_PKT_INTEGRITY
-        sec_trailer['auth_ctx_id'] = 0 + 79231 
+        sec_trailer['auth_ctx_id'] = 0 + 79231
         pad = (4 - (len(packet.get_packet()) % 4)) % 4
         if pad != 0:
            packet['pduData'] += b'\xFF'*pad
@@ -107,7 +108,7 @@ class RPC:
 
 
 class SMB1:
-    def __init__(self, remote_name, remote_host, my_name=None, 
+    def __init__(self, remote_name, remote_host, my_name=None,
                     sess_port=445, timeout=60, session=None, negSessionResponse=None):
         self._uid = 0
         self._dialects_data = None
@@ -238,7 +239,7 @@ class SMB1:
 
 
 class SMB3:
-    def __init__(self, remote_name, remote_host, my_name=None, 
+    def __init__(self, remote_name, remote_host, my_name=None,
                     sess_port=445, timeout=60, session=None, negSessionResponse=None):
         self._NetBIOSSession = session
         self._sequenceWindow = 0
@@ -250,7 +251,7 @@ class SMB3:
             self._NetBIOSSession = nmb.NetBIOSTCPSession(my_name, remote_name, remote_host, nmb.TYPE_SERVER, sess_port, timeout)
         else:
             self._sequenceWindow += 1
-        
+
         self._negotiateResponse = self._negotiateSession(negSessionResponse)
 
     def GetNegotiateResponse(self):
@@ -315,7 +316,7 @@ class SMB3:
 
         blob = SPNEGO_NegTokenInit()
         blob['MechTypes'] = [TypesMech['NTLMSSP - Microsoft NTLM Security Support Provider']]
-        
+
         self._auth = ntlm.getNTLMSSPType1('', '', False)
         blob['MechToken'] = self._auth.getData()
 
@@ -352,10 +353,10 @@ class SmbConnection:
         packet = self._negotiateSessionWildcard(True, flags1=flags1, flags2=flags2, data=negoData)
 
         if packet[0:1] == b'\xfe':
-            self._SMBConnection = SMB3(self.hostname, self.target, self._myName, self._sess_port, 
+            self._SMBConnection = SMB3(self.hostname, self.target, self._myName, self._sess_port,
                                         self._timeout, session=self._nmbSession, negSessionResponse=SMB2Packet(packet))
         else:
-            self._SMBConnection = SMB1(self.hostname, self.target, self._myName, self._sess_port, 
+            self._SMBConnection = SMB1(self.hostname, self.target, self._myName, self._sess_port,
                                         self._timeout, session=self._nmbSession, negSessionResponse=packet)
         return self._SMBConnection.GetNegotiateResponse()
 
@@ -419,7 +420,7 @@ class DumpNtlm:
 
     def GetSmbInfo(self) -> dict:
         connection = SmbConnection(self.target, self.hostname, self._sess_port)
-        negotiation = connection.NegotiateSession()
+        connection.NegotiateSession()
         ntlmChallenge = connection.GetChallange()
         return self.GetChallangeInfo(ntlmChallenge)
 
@@ -430,26 +431,26 @@ class DumpNtlm:
             if av_pairs[ntlm.NTLMSSP_AV_HOSTNAME] is not None:
                 try:
                     info['name'] = av_pairs[ntlm.NTLMSSP_AV_HOSTNAME][1].decode('utf-16le')
-                except:
+                except Exception:
                     pass
             if av_pairs[ntlm.NTLMSSP_AV_DOMAINNAME] is not None:
                 try:
                     info['domain'] = av_pairs[ntlm.NTLMSSP_AV_DOMAINNAME][1].decode('utf-16le')
-                except:
+                except Exception:
                     pass
             if av_pairs[ntlm.NTLMSSP_AV_DNS_TREENAME] is not None:
                 try:
                     info['dns_tree'] = av_pairs[ntlm.NTLMSSP_AV_DNS_TREENAME][1].decode('utf-16le')
-                except:
+                except Exception:
                     pass
             if av_pairs[ntlm.NTLMSSP_AV_DNS_DOMAINNAME] is not None:
                 try:
                     info['dns_domain'] = av_pairs[ntlm.NTLMSSP_AV_DNS_DOMAINNAME][1].decode('utf-16le')
-                except:
+                except Exception:
                     pass
             if av_pairs[ntlm.NTLMSSP_AV_DNS_HOSTNAME] is not None:
                 try:
                     info['dns_host'] = av_pairs[ntlm.NTLMSSP_AV_DNS_HOSTNAME][1].decode('utf-16le')
-                except:
+                except Exception:
                     pass
         return info
