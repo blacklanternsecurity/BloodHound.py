@@ -22,6 +22,8 @@
 #
 ####################
 import logging
+import random
+import time
 import traceback
 import codecs
 import json
@@ -228,7 +230,7 @@ class ADDC(ADComputer):
             logging.error('Exception during GC LDAP connection: %s', str(e))
             return False
 
-    def search(self, search_filter='(objectClass=*)',attributes=None, search_base=None, generator=True, use_gc=False, use_resolver=False, query_sd=False, is_retry=False,  search_scope=SUBTREE,):
+    def search(self, search_filter='(objectClass=*)',attributes=None, search_base=None, generator=True, use_gc=False, use_resolver=False, query_sd=False, is_retry=False,  search_scope=SUBTREE, _seen_dns=None):
         """
         Search for objects in LDAP or Global Catalog LDAP (or ADWS if enabled).
         """
@@ -302,6 +304,8 @@ class ADDC(ADComputer):
 
         hadresults = False
         result_count = 0
+        if _seen_dns is None:
+            _seen_dns = set()
         logging.debug('[LDAP] Search: filter=%s, base=%s, scope=%s, query_sd=%s, paged_size=200',
                       search_filter, search_base, search_scope, query_sd)
         sresult = searcher.extend.standard.paged_search(search_base,
@@ -315,6 +319,11 @@ class ADDC(ADComputer):
             for e in sresult:
                 if e['type'] != 'searchResEntry':
                     continue
+                dn = e.get('dn', '')
+                if dn and dn in _seen_dns:
+                    continue
+                if dn:
+                    _seen_dns.add(dn)
                 if not hadresults:
                     hadresults = True
                 result_count += 1
@@ -332,8 +341,8 @@ class ADDC(ADComputer):
                     self.gc_connect()
                 else:
                     self.ldap_connect(resolver=use_resolver)
-                logging.info('[LDAP] Retrying query %s (had %d results before disconnect)', search_filter, result_count)
-                yield from self.search(search_filter, attributes, search_base, generator, use_gc, use_resolver, query_sd, is_retry=True)
+                logging.info('[LDAP] Retrying query %s (had %d results before disconnect, skipping %d already-yielded)', search_filter, result_count, len(_seen_dns))
+                yield from self.search(search_filter, attributes, search_base, generator, use_gc, use_resolver, query_sd, is_retry=True, _seen_dns=_seen_dns)
 
 
     def ldap_get_single(self, qobject, attributes=None, use_gc=False, use_resolver=False, is_retry=False):
@@ -595,8 +604,10 @@ class ADDC(ADComputer):
                                  query_sd=query_sd, search_base=search_base):
             initial_entries.append(entry)
 
-        # Heuristic: if count is a clean multiple of 256 (batch size),
-        # the pull likely hit an error boundary.
+        # Heuristic: a result count that's an exact multiple of the batch size
+        # (512) likely means the pull was truncated by a server error mid-stream.
+        # False positives (domains with exactly 512/1024/... objects) trigger an
+        # unnecessary split — slower but still correct, no data loss.
         if len(initial_entries) > 0 and len(initial_entries) % 512 == 0:
             logging.info('[AUTOSPLIT] %s query returned exactly %d results (likely partial), '
                          'discarding and splitting by CN prefix',
@@ -611,7 +622,6 @@ class ADDC(ADComputer):
     def _split_by_prefix(self, base_query, attributes, object_type, query_sd=False,
                          search_base=None, prefixes=None, depth=0):
         """Recursively split a query by CN prefix to stay under server limits."""
-        import time as _time
 
         if depth > 2:
             logging.warning('[AUTOSPLIT] Max split depth reached, returning what we have')
@@ -627,15 +637,13 @@ class ADDC(ADComputer):
     def _split_by_prefix_iter(self, base_query, attributes, object_type, query_sd=False,
                               search_base=None, prefixes=None, depth=0):
         """Streaming version of prefix splitting. Yields entries one at a time."""
-        import time as _time
-        import random as _random
 
         if depth > 2:
             logging.warning('[AUTOSPLIT] Max split depth reached')
             return
 
         chars = list(self._AUTOSPLIT_CHARS)
-        _random.shuffle(chars)
+        random.shuffle(chars)
         parent_prefix = prefixes[0] if prefixes else ''
         total = 0
 
@@ -651,7 +659,7 @@ class ADDC(ADComputer):
             logging.debug('[AUTOSPLIT] Querying %s with prefix cn=%s* (depth=%d)', object_type, prefix, depth)
 
             if char != chars[0]:
-                _time.sleep(_random.uniform(0.3, 1.5))
+                time.sleep(random.uniform(0.3, 1.5))
 
             sub_count = 0
             for entry in self.search(split_query, attributes, generator=True,
@@ -663,7 +671,7 @@ class ADDC(ADComputer):
             if sub_count > 0 and sub_count % 512 == 0:
                 logging.info('[AUTOSPLIT] Prefix cn=%s* returned %d results (likely partial), subdividing',
                              prefix, sub_count)
-                _time.sleep(_random.uniform(1.5, 3.0))
+                time.sleep(random.uniform(1.5, 3.0))
                 for entry in self._split_by_prefix_iter(base_query, attributes, object_type,
                                                          query_sd=query_sd, search_base=search_base,
                                                          prefixes=[prefix], depth=depth + 1):
@@ -672,6 +680,27 @@ class ADDC(ADComputer):
             elif sub_count > 0:
                 logging.debug('[AUTOSPLIT] Prefix cn=%s*: %d results (total so far: %d)',
                               prefix, sub_count, total)
+
+        # Catch-all for CNs starting with characters not in the prefix set
+        # (underscores, dashes, dollars, spaces, non-ASCII, etc.)
+        if depth == 0:
+            negation = ''.join('(!(cn=%s*))' % c for c in self._AUTOSPLIT_CHARS)
+            if base_query.startswith('(&'):
+                catchall_query = '(&%s%s' % (negation, base_query[2:])
+            elif base_query.startswith('(|'):
+                catchall_query = '(&%s%s)' % (negation, base_query)
+            else:
+                catchall_query = '(&%s%s)' % (negation, base_query)
+
+            time.sleep(random.uniform(0.3, 1.5))
+            catchall_count = 0
+            for entry in self.search(catchall_query, attributes, generator=True,
+                                     query_sd=query_sd, search_base=search_base):
+                catchall_count += 1
+                total += 1
+                yield entry
+            if catchall_count > 0:
+                logging.debug('[AUTOSPLIT] Catch-all (non-alphanumeric CN prefix): %d results', catchall_count)
 
         logging.info('[AUTOSPLIT] Split complete for %s (depth=%d): %d total results', object_type, depth, total)
 
@@ -687,7 +716,6 @@ class ADDC(ADComputer):
         only the SD map (~200MB for 40k objects) instead of holding both
         the full object list and the SD map simultaneously (~2.4GB).
         """
-        import time as _time
 
         # Pass 1: fetch security descriptors into a lookup dict
         logging.info('ADWS %s collection: fetching security descriptors first', object_type)
@@ -704,7 +732,7 @@ class ADDC(ADComputer):
         logging.info('Security descriptors fetched: %d for %s', len(sd_map), object_type)
         del sd_entries
 
-        _time.sleep(2)
+        time.sleep(2)
 
         # Pass 2: stream objects, merging SDs on the fly
         logging.info('ADWS %s collection: streaming objects', object_type)

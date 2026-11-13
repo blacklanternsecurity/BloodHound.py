@@ -7,6 +7,7 @@ Modified for BloodHound.py - NTLM and Kerberos authentication.
 import datetime
 import logging
 import socket
+import time
 from base64 import b64decode
 from enum import IntFlag
 from typing import Self, Type
@@ -321,7 +322,7 @@ class ADWSConnect:
 
         return nmf
 
-    def _query_enumeration(
+    def query_enumeration(
         self, remoteName: str, nmf: ms_nmf.NMFConnection, query: str, attributes: list,
         search_base: str | None = None, scope: str = "Subtree"
     ) -> str | None:
@@ -366,7 +367,7 @@ class ADWSConnect:
 
         return enum_ctx.text if enum_ctx is not None else None
 
-    def _pull_results(
+    def pull_results(
         self, remoteName: str, nmf: ms_nmf.NMFConnection, enum_ctx: str,
         query_sd: bool = False,
     ) -> tuple[ElementTree.Element, bool]:
@@ -407,7 +408,7 @@ class ADWSConnect:
 
         return (et, True)
 
-    def _release_enumeration(self, remoteName: str, nmf: ms_nmf.NMFConnection, enum_ctx: str) -> None:
+    def release_enumeration(self, remoteName: str, nmf: ms_nmf.NMFConnection, enum_ctx: str) -> None:
         """Send a WS-Enumeration Release to free the server-side enumeration context."""
         try:
             release = LDAP_RELEASE_FSTRING.format(
@@ -521,7 +522,7 @@ class ADWSConnect:
         if self._resource != "Enumeration":
             raise NotImplementedError("Pull is only supported on 'pull' clients")
 
-        enum_ctx = self._query_enumeration(
+        enum_ctx = self.query_enumeration(
             remoteName=self._fqdn,
             nmf=self._nmf,
             query=query,
@@ -535,27 +536,26 @@ class ADWSConnect:
             )
             raise ValueError("unable to get enumeration context")
 
-        import time as _time
 
         ElementTree.register_namespace("wsen", NAMESPACES["wsen"])
         results: ElementTree.Element = ElementTree.Element("wsen:Items")
         batch_count = 0
         total_items = 0
-        pull_start_time = _time.monotonic()
+        pull_start_time = time.monotonic()
         more_results = True
         while more_results:
             try:
-                batch_start = _time.monotonic()
+                batch_start = time.monotonic()
                 logging.debug('[ADWS_PULL] Pulling batch %d (elapsed %.1fs)...', batch_count + 1, batch_start - pull_start_time)
-                et, more_results = self._pull_results(
+                et, more_results = self.pull_results(
                     remoteName=self._fqdn, nmf=self._nmf, enum_ctx=enum_ctx,
                     query_sd=query_sd,
                 )
-                batch_elapsed = _time.monotonic() - batch_start
+                batch_elapsed = time.monotonic() - batch_start
                 logging.debug('[ADWS_PULL] Batch %d took %.1fs', batch_count + 1, batch_elapsed)
             except Exception as e:
                 error_str = str(e)
-                self._release_enumeration(self._fqdn, self._nmf, enum_ctx)
+                self.release_enumeration(self._fqdn, self._nmf, enum_ctx)
                 if 'does not support the control' in error_str and batch_count == 0:
                     logging.warning('[ADWS_PULL] Server rejected control on first batch, re-raising for retry')
                     raise

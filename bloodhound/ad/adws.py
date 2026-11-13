@@ -481,14 +481,15 @@ class ADWSClient:
         logging.debug('ADWS search: filter=%s, base=%s, scope=%s, query_sd=%s', search_filter, search_base, adws_scope, query_sd)
 
         max_retries = 3
+        seen_dns = set()
         for attempt in range(max_retries + 1):
             try:
                 if attempt > 0:
-                    logging.debug('[ADWS_SEARCH] Attempt %d/%d for filter=%s', attempt + 1, max_retries + 1, search_filter)
+                    logging.debug('[ADWS_SEARCH] Attempt %d/%d for filter=%s (skipping %d already-yielded)',
+                                  attempt + 1, max_retries + 1, search_filter, len(seen_dns))
 
-                # Enumerate: get the enumeration context (lock held only for this round-trip)
                 with self._io_lock:
-                    enum_ctx = self._client._query_enumeration(
+                    enum_ctx = self._client.query_enumeration(
                         remoteName=self._client._fqdn,
                         nmf=self._client._nmf,
                         query=search_filter,
@@ -500,22 +501,25 @@ class ADWSClient:
                     logging.warning('[ADWS_SEARCH] No enumeration context for filter=%s', search_filter)
                     return
 
-                # Pull batches one at a time, releasing the lock between batches
                 entry_count = 0
                 batch_count = 0
                 more_results = True
                 while more_results:
                     with self._io_lock:
-                        batch_xml, more_results = self._client._pull_results(
+                        batch_xml, more_results = self._client.pull_results(
                             remoteName=self._client._fqdn,
                             nmf=self._client._nmf,
                             enum_ctx=enum_ctx,
                             query_sd=query_sd,
                         )
                     batch_count += 1
-                    # Parse and yield entries from this batch, then discard the XML
                     for entry in self._parse_xml_entries(batch_xml):
                         self._complete_ranged_members(entry)
+                        dn = entry.get('dn', '')
+                        if dn and dn in seen_dns:
+                            continue
+                        if dn:
+                            seen_dns.add(dn)
                         entry_count += 1
                         yield entry
                     del batch_xml
@@ -529,7 +533,7 @@ class ADWSClient:
                 try:
                     if 'enum_ctx' in dir() and enum_ctx:
                         with self._io_lock:
-                            self._client._release_enumeration(self._client._fqdn, self._client._nmf, enum_ctx)
+                            self._client.release_enumeration(self._client._fqdn, self._client._nmf, enum_ctx)
                 except Exception:
                     pass
 
